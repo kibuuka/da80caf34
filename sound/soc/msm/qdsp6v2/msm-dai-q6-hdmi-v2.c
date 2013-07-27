@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -23,11 +23,21 @@
 #include <sound/apr_audio-v2.h>
 #include <sound/q6afe-v2.h>
 #include <sound/msm-dai-q6-v2.h>
+#include <sound/pcm_params.h>
+
+#define HDMI_RX_CA_MAX 0x32
 
 enum {
 	STATUS_PORT_STARTED, /* track if AFE port has started */
 	STATUS_MAX
 };
+
+struct msm_hdmi_ca {
+	bool set_ca;
+	u32 ca;
+};
+
+static struct msm_hdmi_ca hdmi_ca = { false, 0x0 };
 
 struct msm_dai_q6_hdmi_dai_data {
 	DECLARE_BITMAP(status_mask, STATUS_MAX);
@@ -57,6 +67,20 @@ static int msm_dai_q6_hdmi_format_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+static int msm_dai_q6_hdmi_ca_put(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *ucontrol)
+{
+	hdmi_ca.ca = ucontrol->value.integer.value[0];
+	hdmi_ca.set_ca = true;
+	return 0;
+}
+
+static int msm_dai_q6_hdmi_ca_get(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = hdmi_ca.ca;
+	return 0;
+}
 
 /* HDMI format field for AFE_PORT_MULTI_CHAN_HDMI_AUDIO_IF_CONFIG command
  *  0: linear PCM
@@ -75,6 +99,10 @@ static const struct snd_kcontrol_new hdmi_config_controls[] = {
 	SOC_ENUM_EXT("HDMI RX Format", hdmi_config_enum[0],
 				 msm_dai_q6_hdmi_format_get,
 				 msm_dai_q6_hdmi_format_put),
+	SOC_SINGLE_MULTI_EXT("HDMI RX CA", SND_SOC_NOPM, 0,
+				 HDMI_RX_CA_MAX, 0, 1,
+				 msm_dai_q6_hdmi_ca_get,
+				 msm_dai_q6_hdmi_ca_put),
 };
 
 /* Current implementation assumes hw_param is called once
@@ -92,7 +120,14 @@ static int msm_dai_q6_hdmi_hw_params(struct snd_pcm_substream *substream,
 	dai_data->port_config.hdmi_multi_ch.reserved = 0;
 	dai_data->port_config.hdmi_multi_ch.hdmi_cfg_minor_version = 1;
 	dai_data->port_config.hdmi_multi_ch.sample_rate = dai_data->rate;
-	dai_data->port_config.hdmi_multi_ch.bit_width = 16;
+	switch (params_format(params)) {
+	case SNDRV_PCM_FORMAT_S16_LE:
+		dai_data->port_config.hdmi_multi_ch.bit_width = 16;
+		break;
+	case SNDRV_PCM_FORMAT_S24_LE:
+		dai_data->port_config.hdmi_multi_ch.bit_width = 24;
+		break;
+	}
 
 	switch (dai_data->channels) {
 	case 2:
@@ -152,6 +187,10 @@ static int msm_dai_q6_hdmi_prepare(struct snd_pcm_substream *substream,
 	struct msm_dai_q6_hdmi_dai_data *dai_data = dev_get_drvdata(dai->dev);
 	int rc = 0;
 
+	if (hdmi_ca.set_ca)
+		dai_data->port_config.hdmi_multi_ch.channel_allocation =
+								 hdmi_ca.ca;
+
 	if (!test_bit(STATUS_PORT_STARTED, dai_data->status_mask)) {
 		rc = afe_port_start(dai->id, &dai_data->port_config,
 				    dai_data->rate);
@@ -186,6 +225,12 @@ static int msm_dai_q6_hdmi_dai_probe(struct snd_soc_dai *dai)
 
 	rc = snd_ctl_add(dai->card->snd_card,
 					 snd_ctl_new1(kcontrol, dai_data));
+
+	kcontrol = &hdmi_config_controls[1];
+
+	rc = snd_ctl_add(dai->card->snd_card,
+					 snd_ctl_new1(kcontrol, dai_data));
+
 	return rc;
 }
 
@@ -220,7 +265,7 @@ static struct snd_soc_dai_ops msm_dai_q6_hdmi_ops = {
 static struct snd_soc_dai_driver msm_dai_q6_hdmi_hdmi_rx_dai = {
 	.playback = {
 		.rates = SNDRV_PCM_RATE_48000,
-		.formats = SNDRV_PCM_FMTBIT_S16_LE,
+		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE,
 		.channels_min = 2,
 		.channels_max = 8,
 		.rate_max =     48000,

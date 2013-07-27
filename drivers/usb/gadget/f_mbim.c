@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -63,9 +63,10 @@ struct mbim_notify_port {
 };
 
 enum mbim_notify_state {
-	NCM_NOTIFY_NONE,
-	NCM_NOTIFY_CONNECT,
-	NCM_NOTIFY_SPEED,
+	MBIM_NOTIFY_NONE,
+	MBIM_NOTIFY_CONNECT,
+	MBIM_NOTIFY_SPEED,
+	MBIM_NOTIFY_RESPONSE_AVAILABLE,
 };
 
 struct f_mbim {
@@ -83,6 +84,7 @@ struct f_mbim {
 	wait_queue_head_t read_wq;
 	wait_queue_head_t write_wq;
 
+	enum transport_type		xport;
 	u8				port_num;
 	struct data_port		bam_port;
 	struct mbim_notify_port		not_port;
@@ -93,7 +95,7 @@ struct f_mbim {
 	u8				ctrl_id, data_id;
 	u8				data_alt_int;
 
-	struct ndp_parser_opts		*parser_opts;
+	struct mbim_ndp_parser_opts	*parser_opts;
 
 	spinlock_t			lock;
 
@@ -138,21 +140,24 @@ static inline unsigned mbim_bitrate(struct usb_gadget *g)
 
 /*-------------------------------------------------------------------------*/
 
-#define NTB_DEFAULT_IN_SIZE	(0x4000)
-#define NTB_OUT_SIZE		(0x1000)
-#define NDP_IN_DIVISOR		(0x4)
+#define MBIM_NTB_DEFAULT_IN_SIZE	(0x4000)
+#define MBIM_NTB_OUT_SIZE		(0x1000)
+#define MBIM_NDP_IN_DIVISOR		(0x4)
 
-#define FORMATS_SUPPORTED	USB_CDC_NCM_NTB16_SUPPORTED
+#define NTB_DEFAULT_IN_SIZE_IPA	(0x2000)
+#define MBIM_NTB_OUT_SIZE_IPA		(0x2000)
 
-static struct usb_cdc_ncm_ntb_parameters ntb_parameters = {
-	.wLength = sizeof ntb_parameters,
-	.bmNtbFormatsSupported = cpu_to_le16(FORMATS_SUPPORTED),
-	.dwNtbInMaxSize = cpu_to_le32(NTB_DEFAULT_IN_SIZE),
-	.wNdpInDivisor = cpu_to_le16(NDP_IN_DIVISOR),
+#define MBIM_FORMATS_SUPPORTED	USB_CDC_NCM_NTB16_SUPPORTED
+
+static struct usb_cdc_ncm_ntb_parameters mbim_ntb_parameters = {
+	.wLength = sizeof mbim_ntb_parameters,
+	.bmNtbFormatsSupported = cpu_to_le16(MBIM_FORMATS_SUPPORTED),
+	.dwNtbInMaxSize = cpu_to_le32(MBIM_NTB_DEFAULT_IN_SIZE),
+	.wNdpInDivisor = cpu_to_le16(MBIM_NDP_IN_DIVISOR),
 	.wNdpInPayloadRemainder = cpu_to_le16(0),
 	.wNdpInAlignment = cpu_to_le16(4),
 
-	.dwNtbOutMaxSize = cpu_to_le32(NTB_OUT_SIZE),
+	.dwNtbOutMaxSize = cpu_to_le32(MBIM_NTB_OUT_SIZE),
 	.wNdpOutDivisor = cpu_to_le16(4),
 	.wNdpOutPayloadRemainder = cpu_to_le16(0),
 	.wNdpOutAlignment = cpu_to_le16(4),
@@ -223,6 +228,16 @@ static struct usb_cdc_mbb_desc mbb_desc = {
 	.bmNetworkCapabilities = 0x20,
 };
 
+static struct usb_cdc_ext_mbb_desc ext_mbb_desc = {
+	.bLength =	sizeof ext_mbb_desc,
+	.bDescriptorType =	USB_DT_CS_INTERFACE,
+	.bDescriptorSubType =	USB_CDC_EXT_MBB_TYPE,
+
+	.bcdMbbExtendedVersion =	cpu_to_le16(0x0100),
+	.bMaxOutstandingCmdMsges =	64,
+	.wMTU =	1500,
+};
+
 /* the default data interface has no endpoints ... */
 static struct usb_interface_descriptor mbim_data_nop_intf = {
 	.bLength =		sizeof mbim_data_nop_intf,
@@ -284,7 +299,9 @@ static struct usb_descriptor_header *mbim_fs_function[] = {
 	/* MBIM control descriptors */
 	(struct usb_descriptor_header *) &mbim_control_intf,
 	(struct usb_descriptor_header *) &mbim_header_desc,
+	(struct usb_descriptor_header *) &mbim_union_desc,
 	(struct usb_descriptor_header *) &mbb_desc,
+	(struct usb_descriptor_header *) &ext_mbb_desc,
 	(struct usb_descriptor_header *) &fs_mbim_notify_desc,
 	/* data interface, altsettings 0 and 1 */
 	(struct usb_descriptor_header *) &mbim_data_nop_intf,
@@ -328,7 +345,9 @@ static struct usb_descriptor_header *mbim_hs_function[] = {
 	/* MBIM control descriptors */
 	(struct usb_descriptor_header *) &mbim_control_intf,
 	(struct usb_descriptor_header *) &mbim_header_desc,
+	(struct usb_descriptor_header *) &mbim_union_desc,
 	(struct usb_descriptor_header *) &mbb_desc,
+	(struct usb_descriptor_header *) &ext_mbb_desc,
 	(struct usb_descriptor_header *) &hs_mbim_notify_desc,
 	/* data interface, altsettings 0 and 1 */
 	(struct usb_descriptor_header *) &mbim_data_nop_intf,
@@ -425,7 +444,7 @@ static struct {
  * and switch pointers to the structures when the format is changed.
  */
 
-struct ndp_parser_opts {
+struct mbim_ndp_parser_opts {
 	u32		nth_sign;
 	u32		ndp_sign;
 	unsigned	nth_size;
@@ -468,8 +487,8 @@ struct ndp_parser_opts {
 	.next_fp_index = 2,				\
 }
 
-static struct ndp_parser_opts ndp16_opts = INIT_NDP16_OPTS;
-static struct ndp_parser_opts ndp32_opts = INIT_NDP32_OPTS;
+static struct mbim_ndp_parser_opts mbim_ndp16_opts = INIT_NDP16_OPTS;
+static struct mbim_ndp_parser_opts mbim_ndp32_opts = INIT_NDP32_OPTS;
 
 static inline int mbim_lock(atomic_t *excl)
 {
@@ -571,6 +590,7 @@ static void fmbim_ctrl_response_available(struct f_mbim *dev)
 		return;
 	}
 
+	req->length = sizeof *event;
 	event = req->buf;
 	event->bmRequestType = USB_DIR_IN | USB_TYPE_CLASS
 			| USB_RECIP_INTERFACE;
@@ -581,7 +601,7 @@ static void fmbim_ctrl_response_available(struct f_mbim *dev)
 	spin_unlock_irqrestore(&dev->lock, flags);
 
 	ret = usb_ep_queue(dev->not_port.notify,
-			   dev->not_port.notify_req, GFP_ATOMIC);
+			   req, GFP_ATOMIC);
 	if (ret) {
 		atomic_dec(&dev->not_port.notify_count);
 		pr_err("ep enqueue error %d\n", ret);
@@ -606,6 +626,13 @@ fmbim_send_cpkt_response(struct f_mbim *gr, struct ctrl_pkt *cpkt)
 
 	if (!atomic_read(&dev->online)) {
 		pr_err("dev:%p is not connected\n", dev);
+		mbim_free_ctrl_pkt(cpkt);
+		return 0;
+	}
+
+	if (dev->not_port.notify_state != MBIM_NOTIFY_RESPONSE_AVAILABLE) {
+		pr_err("dev:%p state=%d, recover!!\n", dev,
+			dev->not_port.notify_state);
 		mbim_free_ctrl_pkt(cpkt);
 		return 0;
 	}
@@ -637,21 +664,58 @@ static int mbim_bam_setup(int no_ports)
 	return 0;
 }
 
+int mbim_configure_params(void)
+{
+	struct teth_aggr_params aggr_params;
+	int ret = 0;
+
+	aggr_params.dl.aggr_prot = TETH_AGGR_PROTOCOL_MBIM;
+	aggr_params.dl.max_datagrams = mbim_ntb_parameters.wNtbOutMaxDatagrams;
+	aggr_params.dl.max_transfer_size_byte =
+			mbim_ntb_parameters.dwNtbInMaxSize;
+
+	aggr_params.ul.aggr_prot = TETH_AGGR_PROTOCOL_MBIM;
+	aggr_params.ul.max_datagrams = mbim_ntb_parameters.wNtbOutMaxDatagrams;
+	aggr_params.ul.max_transfer_size_byte =
+			mbim_ntb_parameters.dwNtbOutMaxSize;
+
+	ret = teth_bridge_set_aggr_params(&aggr_params);
+	if (ret)
+		pr_err("%s: teth_bridge_set_aggr_params failed\n", __func__);
+
+	return ret;
+}
+
 static int mbim_bam_connect(struct f_mbim *dev)
 {
 	int ret;
+	u8 src_connection_idx, dst_connection_idx;
+	struct usb_gadget *gadget = dev->cdev->gadget;
+	enum peer_bam bam_name = (dev->xport == USB_GADGET_XPORT_BAM2BAM_IPA) ?
+							IPA_P_BAM : A2_P_BAM;
 
 	pr_info("dev:%p portno:%d\n", dev, dev->port_num);
 
-	ret = bam_data_connect(&dev->bam_port, dev->port_num, dev->port_num);
+	src_connection_idx = usb_bam_get_connection_idx(gadget->name, bam_name,
+					USB_TO_PEER_PERIPHERAL, dev->port_num);
+	dst_connection_idx = usb_bam_get_connection_idx(gadget->name, bam_name,
+					PEER_PERIPHERAL_TO_USB, dev->port_num);
+	if (src_connection_idx < 0 || dst_connection_idx < 0) {
+		pr_err("%s: usb_bam_get_connection_idx failed\n", __func__);
+		return ret;
+	}
+
+	ret = bam_data_connect(&dev->bam_port, dev->port_num,
+		dev->xport, src_connection_idx, dst_connection_idx,
+		USB_FUNC_MBIM);
+
 	if (ret) {
 		pr_err("bam_data_setup failed: err:%d\n",
 				ret);
 		return ret;
-	} else {
-		pr_info("mbim bam connected\n");
 	}
 
+	pr_info("mbim bam connected\n");
 	return 0;
 }
 
@@ -669,9 +733,9 @@ static int mbim_bam_disconnect(struct f_mbim *dev)
 
 static inline void mbim_reset_values(struct f_mbim *mbim)
 {
-	mbim->parser_opts = &ndp16_opts;
+	mbim->parser_opts = &mbim_ndp16_opts;
 
-	mbim->ntb_input_size = NTB_DEFAULT_IN_SIZE;
+	mbim->ntb_input_size = MBIM_NTB_DEFAULT_IN_SIZE;
 
 	atomic_set(&mbim->online, 0);
 }
@@ -736,8 +800,6 @@ static void mbim_do_notify(struct f_mbim *mbim)
 {
 	struct usb_request		*req = mbim->not_port.notify_req;
 	struct usb_cdc_notification	*event;
-	struct usb_composite_dev	*cdev = mbim->cdev;
-	__le32				*data;
 	int				status;
 
 	pr_debug("notify_state: %d", mbim->not_port.notify_state);
@@ -749,11 +811,19 @@ static void mbim_do_notify(struct f_mbim *mbim)
 
 	switch (mbim->not_port.notify_state) {
 
-	case NCM_NOTIFY_NONE:
+	case MBIM_NOTIFY_NONE:
+		if (atomic_read(&mbim->not_port.notify_count) > 0)
+			pr_err("Pending notifications in MBIM_NOTIFY_NONE\n");
+		else
+			pr_debug("No pending notifications\n");
+
+		return;
+
+	case MBIM_NOTIFY_RESPONSE_AVAILABLE:
 		pr_debug("Notification %02x sent\n", event->bNotificationType);
 
 		if (atomic_read(&mbim->not_port.notify_count) <= 0) {
-			pr_debug("notify_none: done");
+			pr_debug("notify_response_avaliable: done");
 			return;
 		}
 
@@ -766,36 +836,6 @@ static void mbim_do_notify(struct f_mbim *mbim)
 		}
 
 		return;
-
-	case NCM_NOTIFY_CONNECT:
-		event->bNotificationType = USB_CDC_NOTIFY_NETWORK_CONNECTION;
-		if (mbim->is_open)
-			event->wValue = cpu_to_le16(1);
-		else
-			event->wValue = cpu_to_le16(0);
-		event->wLength = 0;
-		req->length = sizeof *event;
-
-		pr_info("notify connect %s\n",
-			mbim->is_open ? "true" : "false");
-		mbim->not_port.notify_state = NCM_NOTIFY_NONE;
-		break;
-
-	case NCM_NOTIFY_SPEED:
-		event->bNotificationType = USB_CDC_NOTIFY_SPEED_CHANGE;
-		event->wValue = cpu_to_le16(0);
-		event->wLength = cpu_to_le16(8);
-		req->length = NCM_STATUS_BYTECOUNT;
-
-		/* SPEED_CHANGE data is up/down speeds in bits/sec */
-		data = req->buf + sizeof *event;
-		data[0] = cpu_to_le32(mbim_bitrate(cdev->gadget));
-		data[1] = data[0];
-
-		pr_info("notify speed %d\n",
-			mbim_bitrate(cdev->gadget));
-		mbim->not_port.notify_state = NCM_NOTIFY_CONNECT;
-		break;
 	}
 
 	event->bmRequestType = 0xA1;
@@ -818,22 +858,6 @@ static void mbim_do_notify(struct f_mbim *mbim)
 	}
 }
 
-/*
- * Context: mbim->lock held
- */
-static void mbim_notify(struct f_mbim *mbim)
-{
-	/*
-	 * If mbim_notify() is called before the second (CONNECT)
-	 * notification is sent, then it will reset to send the SPEED
-	 * notificaion again (and again, and again), but it's not a problem
-	 */
-	pr_debug("dev:%p\n", mbim);
-
-	mbim->not_port.notify_state = NCM_NOTIFY_SPEED;
-	mbim_do_notify(mbim);
-}
-
 static void mbim_notify_complete(struct usb_ep *ep, struct usb_request *req)
 {
 	struct f_mbim			*mbim = req->context;
@@ -852,7 +876,7 @@ static void mbim_notify_complete(struct usb_ep *ep, struct usb_request *req)
 	case -ECONNRESET:
 	case -ESHUTDOWN:
 		/* connection gone */
-		mbim->not_port.notify_state = NCM_NOTIFY_NONE;
+		mbim->not_port.notify_state = MBIM_NOTIFY_NONE;
 		atomic_set(&mbim->not_port.notify_count, 0);
 		pr_info("ESHUTDOWN/ECONNRESET, connection gone");
 		spin_unlock(&mbim->lock);
@@ -891,7 +915,7 @@ static void mbim_ep0out_complete(struct usb_ep *ep, struct usb_request *req)
 	if (req->length == 4) {
 		in_size = get_unaligned_le32(req->buf);
 		if (in_size < USB_CDC_NCM_NTB_MIN_IN_SIZE ||
-		    in_size > le32_to_cpu(ntb_parameters.dwNtbInMaxSize)) {
+		    in_size > le32_to_cpu(mbim_ntb_parameters.dwNtbInMaxSize)) {
 			pr_err("Illegal INPUT SIZE (%d) from host\n", in_size);
 			goto invalid;
 		}
@@ -899,7 +923,7 @@ static void mbim_ep0out_complete(struct usb_ep *ep, struct usb_request *req)
 		ntb = (struct mbim_ntb_input_size *)req->buf;
 		in_size = get_unaligned_le32(&(ntb->ntb_input_size));
 		if (in_size < USB_CDC_NCM_NTB_MIN_IN_SIZE ||
-		    in_size > le32_to_cpu(ntb_parameters.dwNtbInMaxSize)) {
+		    in_size > le32_to_cpu(mbim_ntb_parameters.dwNtbInMaxSize)) {
 			pr_err("Illegal INPUT SIZE (%d) from host\n", in_size);
 			goto invalid;
 		}
@@ -1058,9 +1082,9 @@ mbim_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 		if (w_length == 0 || w_value != 0 || w_index != mbim->ctrl_id)
 			break;
 
-		value = w_length > sizeof ntb_parameters ?
-			sizeof ntb_parameters : w_length;
-		memcpy(req->buf, &ntb_parameters, value);
+		value = w_length > sizeof mbim_ntb_parameters ?
+			sizeof mbim_ntb_parameters : w_length;
+		memcpy(req->buf, &mbim_ntb_parameters, value);
 		break;
 
 	case ((USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8)
@@ -1107,7 +1131,7 @@ mbim_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 		if (w_length < 2 || w_value != 0 || w_index != mbim->ctrl_id)
 			break;
 
-		format = (mbim->parser_opts == &ndp16_opts) ? 0x0000 : 0x0001;
+		format = (mbim->parser_opts == &mbim_ndp16_opts) ? 0 : 1;
 		put_unaligned_le16(format, req->buf);
 		value = 2;
 		pr_debug("NTB FORMAT: sending %d\n", format);
@@ -1123,11 +1147,11 @@ mbim_setup(struct usb_function *f, const struct usb_ctrlrequest *ctrl)
 			break;
 		switch (w_value) {
 		case 0x0000:
-			mbim->parser_opts = &ndp16_opts;
+			mbim->parser_opts = &mbim_ndp16_opts;
 			pr_debug("NCM16 selected\n");
 			break;
 		case 0x0001:
-			mbim->parser_opts = &ndp32_opts;
+			mbim->parser_opts = &mbim_ndp32_opts;
 			pr_debug("NCM32 selected\n");
 			break;
 		default:
@@ -1321,7 +1345,7 @@ static int mbim_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 
 		mbim->data_alt_int = alt;
 		spin_lock(&mbim->lock);
-		mbim_notify(mbim);
+		mbim->not_port.notify_state = MBIM_NOTIFY_RESPONSE_AVAILABLE;
 		spin_unlock(&mbim->lock);
 	} else {
 		goto fail;
@@ -1364,6 +1388,8 @@ static void mbim_disable(struct usb_function *f)
 
 	pr_info("SET DEVICE OFFLINE");
 	atomic_set(&mbim->online, 0);
+
+	mbim->not_port.notify_state = MBIM_NOTIFY_NONE;
 
 	mbim_clear_queues(mbim);
 	mbim_reset_function_queue(mbim);
@@ -1473,6 +1499,11 @@ mbim_bind(struct usb_configuration *c, struct usb_function *f)
 	mbim->not_port.notify_req->context = mbim;
 	mbim->not_port.notify_req->complete = mbim_notify_complete;
 
+	if (mbim->xport == USB_GADGET_XPORT_BAM2BAM_IPA)
+		mbb_desc.wMaxSegmentSize = cpu_to_le16(0x800);
+	else
+		mbb_desc.wMaxSegmentSize = cpu_to_le16(0xfe0);
+
 	/* copy descriptors, and track endpoint copies */
 	f->descriptors = usb_copy_descriptors(mbim_fs_function);
 	if (!f->descriptors)
@@ -1559,7 +1590,8 @@ static void mbim_unbind(struct usb_configuration *c, struct usb_function *f)
  * Context: single threaded during gadget setup
  * Returns zero on success, else negative errno.
  */
-int mbim_bind_config(struct usb_configuration *c, unsigned portno)
+int mbim_bind_config(struct usb_configuration *c, unsigned portno,
+					 char *xport_name)
 {
 	struct f_mbim	*mbim = NULL;
 	int status = 0;
@@ -1618,6 +1650,21 @@ int mbim_bind_config(struct usb_configuration *c, unsigned portno)
 	mbim->function.disable = mbim_disable;
 	mbim->function.suspend = mbim_suspend;
 	mbim->function.resume = mbim_resume;
+	mbim->xport = str_to_xport(xport_name);
+
+	if (mbim->xport != USB_GADGET_XPORT_BAM2BAM_IPA) {
+		/* Use BAM2BAM by default if not IPA */
+		mbim->xport = USB_GADGET_XPORT_BAM2BAM;
+	} else  {
+		/* For IPA we use limit of 16 */
+		mbim_ntb_parameters.wNtbOutMaxDatagrams = 16;
+		/* For IPA this is proven to give maximum throughput */
+		mbim_ntb_parameters.dwNtbInMaxSize =
+		cpu_to_le32(NTB_DEFAULT_IN_SIZE_IPA);
+		mbim_ntb_parameters.dwNtbOutMaxSize =
+				cpu_to_le32(MBIM_NTB_OUT_SIZE_IPA);
+		mbim_ntb_parameters.wNdpInDivisor = 1;
+	}
 
 	INIT_LIST_HEAD(&mbim->cpkt_req_q);
 	INIT_LIST_HEAD(&mbim->cpkt_resp_q);
@@ -1674,7 +1721,7 @@ mbim_read(struct file *fp, char __user *buf, size_t count, loff_t *pos)
 	}
 
 	while (list_empty(&dev->cpkt_req_q)) {
-		pr_err("Requests list is empty. Wait.\n");
+		pr_debug("Requests list is empty. Wait.\n");
 		ret = wait_event_interruptible(dev->read_wq,
 			!list_empty(&dev->cpkt_req_q));
 		if (ret < 0) {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,6 +10,7 @@
  * GNU General Public License for more details.
  */
 
+#include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
@@ -20,6 +21,7 @@
 #include <linux/of_platform.h>
 #include <linux/of_irq.h>
 #include <linux/memory.h>
+#include <linux/msm_tsens.h>
 #include <asm/mach/map.h>
 #include <asm/hardware/gic.h>
 #include <asm/mach/arch.h>
@@ -111,17 +113,21 @@ static struct of_dev_auxdata msm9625_auxdata_lookup[] __initdata = {
 			"msm-tsens", NULL),
 	OF_DEV_AUXDATA("qcom,usb-bam-msm", 0xF9A44000, \
 			"usb_bam", NULL),
+	OF_DEV_AUXDATA("qcom,hsic-host", 0xF9A15000, \
+			"msm_hsic_host", NULL),
 	{}
 };
 
 static void __init msm9625_early_memory(void)
 {
 	reserve_info = &msm9625_reserve_info;
-	of_scan_flat_dt(dt_scan_for_memory_reserve, msm9625_reserve_table);
+	of_scan_flat_dt(dt_scan_for_memory_hole, msm9625_reserve_table);
 }
 
 static void __init msm9625_reserve(void)
 {
+	reserve_info = &msm9625_reserve_info;
+	of_scan_flat_dt(dt_scan_for_memory_reserve, msm9625_reserve_table);
 	msm_reserve();
 }
 
@@ -232,6 +238,7 @@ void __init msm9625_add_drivers(void)
 	msm_spm_device_init();
 	msm_clock_init(&msm9625_clock_init_data);
 	msm9625_init_buses();
+	tsens_tm_init_driver();
 }
 
 void __init msm9625_init(void)
@@ -240,8 +247,7 @@ void __init msm9625_init(void)
 		pr_err("%s: socinfo_init() failed\n", __func__);
 
 	msm9625_init_gpiomux();
-	of_platform_populate(NULL, of_default_bus_match_table,
-			msm9625_auxdata_lookup, NULL);
+	board_dt_populate(msm9625_auxdata_lookup);
 	msm9625_add_drivers();
 }
 

@@ -1,12 +1,13 @@
 #ifndef __MEDIA_INFO_H__
 #define __MEDIA_INFO_H__
 
-#ifndef ALIGN
-#define ALIGN(__sz, __align) (((__sz) + (__align-1)) & (~(__align-1)))
+#ifndef MSM_MEDIA_ALIGN
+#define MSM_MEDIA_ALIGN(__sz, __align) (((__sz) + (__align-1)) & (~(__align-1)))
 #endif
 
 enum color_fmts {
 	COLOR_FMT_NV12,
+	COLOR_FMT_NV21,
 };
 
 static inline unsigned int VENUS_Y_STRIDE(int color_fmt, int width)
@@ -16,9 +17,10 @@ static inline unsigned int VENUS_Y_STRIDE(int color_fmt, int width)
 		goto invalid_input;
 
 	switch (color_fmt) {
+	case COLOR_FMT_NV21:
 	case COLOR_FMT_NV12:
 		alignment = 128;
-		stride = ALIGN(width, alignment);
+		stride = MSM_MEDIA_ALIGN(width, alignment);
 		break;
 	default:
 		break;
@@ -34,9 +36,10 @@ static inline unsigned int VENUS_UV_STRIDE(int color_fmt, int width)
 		goto invalid_input;
 
 	switch (color_fmt) {
+	case COLOR_FMT_NV21:
 	case COLOR_FMT_NV12:
 		alignment = 128;
-		stride = ALIGN(width, alignment);
+		stride = MSM_MEDIA_ALIGN(width, alignment);
 		break;
 	default:
 		break;
@@ -52,9 +55,10 @@ static inline unsigned int VENUS_Y_SCANLINES(int color_fmt, int height)
 		goto invalid_input;
 
 	switch (color_fmt) {
+	case COLOR_FMT_NV21:
 	case COLOR_FMT_NV12:
 		alignment = 32;
-		sclines = ALIGN(height, alignment);
+		sclines = MSM_MEDIA_ALIGN(height, alignment);
 		break;
 	default:
 		break;
@@ -70,9 +74,10 @@ static inline unsigned int VENUS_UV_SCANLINES(int color_fmt, int height)
 		goto invalid_input;
 
 	switch (color_fmt) {
+	case COLOR_FMT_NV21:
 	case COLOR_FMT_NV12:
 		alignment = 16;
-		sclines = ALIGN(((height + 1) >> 1), alignment);
+		sclines = MSM_MEDIA_ALIGN(((height + 1) >> 1), alignment);
 		break;
 	default:
 		break;
@@ -96,12 +101,13 @@ static inline unsigned int VENUS_BUFFER_SIZE(
 	y_sclines = VENUS_Y_SCANLINES(color_fmt, height);
 	uv_sclines = VENUS_UV_SCANLINES(color_fmt, height);
 	switch (color_fmt) {
+	case COLOR_FMT_NV21:
 	case COLOR_FMT_NV12:
 		uv_alignment = 4096;
 		y_plane = y_stride * y_sclines;
 		uv_plane = uv_stride * uv_sclines + uv_alignment;
 		size = y_plane + uv_plane;
-		size = ALIGN(size, 4096);
+		size = MSM_MEDIA_ALIGN(size, 4096);
 		break;
 	default:
 		break;

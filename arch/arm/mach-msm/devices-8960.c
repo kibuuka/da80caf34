@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,7 +21,6 @@
 #include <asm/clkdev.h>
 #include <mach/gpio.h>
 #include <mach/kgsl.h>
-#include <linux/android_pmem.h>
 #include <mach/irqs-8960.h>
 #include <mach/dma.h>
 #include <linux/dma-mapping.h>
@@ -53,6 +52,7 @@
 #include <mach/msm_dcvs.h>
 #include <mach/iommu_domains.h>
 #include <mach/socinfo.h>
+#include "pm.h"
 
 #ifdef CONFIG_MSM_MPM
 #include <mach/mpm.h>
@@ -116,11 +116,18 @@ static struct resource msm8960_resources_pccntr[] = {
 	},
 };
 
-struct platform_device msm8960_pc_cntr = {
-	.name		= "pc-cntr",
+static struct msm_pm_init_data_type msm_pm_data = {
+	.retention_calls_tz = true,
+};
+
+struct platform_device msm8960_pm_8x60 = {
+	.name		= "pm-8x60",
 	.id		= -1,
 	.num_resources	= ARRAY_SIZE(msm8960_resources_pccntr),
 	.resource	= msm8960_resources_pccntr,
+	.dev = {
+		.platform_data = &msm_pm_data,
+	},
 };
 
 static struct resource resources_otg[] = {
@@ -1067,6 +1074,37 @@ static struct resource msm_device_vidc_resources[] = {
 	},
 };
 
+int64_t vidc_v4l2_ns_iommu_mapping[] = {-1, -1};
+int64_t vidc_v4l2_cp_iommu_mapping[] = {-1, -1};
+int64_t *vidc_v4l2_iommu_mappings[] = {
+	[MSM_VIDC_V4L2_IOMMU_MAP_NS] = vidc_v4l2_ns_iommu_mapping,
+	[MSM_VIDC_V4L2_IOMMU_MAP_CP] = vidc_v4l2_cp_iommu_mapping,
+};
+
+int64_t vidc_v4l2_load_1[] = {-1, -1};
+int64_t vidc_v4l2_load_2[] = {-1, -1};
+int64_t *vidc_v4l2_load_table[] = {
+	vidc_v4l2_load_1,
+	vidc_v4l2_load_2,
+};
+
+static struct msm_vidc_v4l2_platform_data vidc_v4l2_plaform_data = {
+	.iommu_table = vidc_v4l2_iommu_mappings,
+	.num_iommu_table = 2,
+	.load_table = vidc_v4l2_load_table,
+	.num_load_table = 2,
+	.max_load = 800*480*30/256,
+};
+
+struct platform_device msm_device_vidc_v4l2 = {
+	.name = "msm_vidc_v4l2",
+	.id = 0,
+	.num_resources = 0,
+	.dev = {
+		.platform_data = &vidc_v4l2_plaform_data,
+	},
+};
+
 struct msm_vidc_platform_data vidc_platform_data = {
 #ifdef CONFIG_MSM_BUS_SCALING
 	.vidc_bus_client_pdata = &vidc_bus_client_data,
@@ -1663,6 +1701,19 @@ struct platform_device msm_device_smd = {
 struct platform_device msm_device_bam_dmux = {
 	.name		= "BAM_RMNT",
 	.id		= -1,
+};
+
+static struct msm_pm_sleep_status_data msm_pm_slp_sts_data = {
+	.base_addr = MSM_ACC0_BASE + 0x08,
+	.cpu_offset = MSM_ACC1_BASE - MSM_ACC0_BASE,
+	.mask = 1UL << 13,
+};
+struct platform_device msm8960_cpu_slp_status = {
+	.name		= "cpu_slp_status",
+	.id		= -1,
+	.dev = {
+		.platform_data = &msm_pm_slp_sts_data,
+	},
 };
 
 static struct msm_watchdog_pdata msm_watchdog_pdata = {
@@ -2456,6 +2507,11 @@ struct platform_device msm_cpudai_afe_02_tx = {
 
 struct platform_device msm_pcm_afe = {
 	.name	= "msm-pcm-afe",
+	.id	= -1,
+};
+
+struct platform_device msm_fm_loopback = {
+	.name	= "msm-pcm-loopback",
 	.id	= -1,
 };
 
@@ -3910,8 +3966,8 @@ static struct msm_rpm_log_platform_data msm_rpm_log_pdata = {
 		[MSM_RPM_LOG_PAGE_BUFFER]  = 0x000000A0,
 	},
 	.phys_size = SZ_8K,
-	.log_len = 4096,		  /* log's buffer length in bytes */
-	.log_len_mask = (4096 >> 2) - 1,  /* length mask in units of u32 */
+	.log_len = 6144,		  /* log's buffer length in bytes */
+	.log_len_mask = (6144 >> 2) - 1,  /* length mask in units of u32 */
 };
 
 struct platform_device msm8960_rpm_log_device = {
@@ -4054,6 +4110,7 @@ struct platform_device msm_dsps_device = {
 
 static struct resource coresight_tpiu_resources[] = {
 	{
+		.name  = "tpiu-base",
 		.start = CORESIGHT_TPIU_PHYS_BASE,
 		.end   = CORESIGHT_TPIU_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,
@@ -4079,6 +4136,7 @@ struct platform_device coresight_tpiu_device = {
 
 static struct resource coresight_etb_resources[] = {
 	{
+		.name  = "etb-base",
 		.start = CORESIGHT_ETB_PHYS_BASE,
 		.end   = CORESIGHT_ETB_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,
@@ -4105,6 +4163,7 @@ struct platform_device coresight_etb_device = {
 
 static struct resource coresight_funnel_resources[] = {
 	{
+		.name  = "funnel-base",
 		.start = CORESIGHT_FUNNEL_PHYS_BASE,
 		.end   = CORESIGHT_FUNNEL_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,
@@ -4137,11 +4196,13 @@ struct platform_device coresight_funnel_device = {
 
 static struct resource coresight_stm_resources[] = {
 	{
+		.name  = "stm-base",
 		.start = CORESIGHT_STM_PHYS_BASE,
 		.end   = CORESIGHT_STM_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,
 	},
 	{
+		.name  = "stm-data-base",
 		.start = CORESIGHT_STM_CHANNEL_PHYS_BASE,
 		.end   = CORESIGHT_STM_CHANNEL_PHYS_BASE + SZ_1M + SZ_512K - 1,
 		.flags = IORESOURCE_MEM,
@@ -4174,6 +4235,7 @@ struct platform_device coresight_stm_device = {
 
 static struct resource coresight_etm0_resources[] = {
 	{
+		.name  = "etm-base",
 		.start = CORESIGHT_ETM0_PHYS_BASE,
 		.end   = CORESIGHT_ETM0_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,
@@ -4206,6 +4268,7 @@ struct platform_device coresight_etm0_device = {
 
 static struct resource coresight_etm1_resources[] = {
 	{
+		.name  = "etm-base",
 		.start = CORESIGHT_ETM1_PHYS_BASE,
 		.end   = CORESIGHT_ETM1_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,
@@ -4564,7 +4627,8 @@ struct platform_device mdm_sglte_device = {
 };
 
 struct platform_device *msm8960_vidc_device[] __initdata = {
-	&msm_device_vidc
+	&msm_device_vidc,
+	&msm_device_vidc_v4l2,
 };
 
 void __init msm8960_add_vidc_device(void)

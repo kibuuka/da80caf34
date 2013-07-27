@@ -73,6 +73,34 @@ config QPNP_CLKDIV
 	  PMIC. These clocks are typically wired through alternate functions
 	  on gpio pins.
 
+config QPNP_VIBRATOR
+	tristate "Vibrator support for QPNP PMIC"
+	depends on OF_SPMI
+	help
+	  This option enables device driver support for the vibrator
+	  on the Qualcomm's QPNP PMICs. The vibrator is connected on the
+	  VIB_DRV_N line and can be controlled manually or by the DTEST lines.
+	  It uses the android timed-output framework.
+
+config QPNP_REVID
+	tristate "QPNP Revision ID Peripheral"
+	depends on SPMI
+	help
+	  Say 'y' here to include support for the Qualcomm QPNP REVID
+	  peripheral. REVID prints out the PMIC type and revision numbers
+	  in the kernel log along with the PMIC option status. The PMIC
+	  type is mapped to a Qualcomm chip part number and logged as well.
+
+config QPNP_COINCELL
+	tristate "Qualcomm QPNP coincell charger support"
+	depends on SPMI && OF_SPMI
+	help
+	  This driver supports the QPNP coincell peripheral found inside of
+	  Qualcomm QPNP PMIC devices.  The coincell charger provides a means to
+	  charge a coincell battery or backup capacitor which is used to
+	  maintain PMIC register state when the main battery is removed from the
+	  mobile device.
+
 config IPA
 	tristate "IPA support"
 	depends on SPS
@@ -91,5 +119,15 @@ config MSM_AVTIMER
 	help
 		This driver gets the Q6 out of power collapsed state and
 		exposes ioctl control to read avtimer tick.
+
+config SSM
+	tristate "Qualcomm Secure Service Module"
+	depends on QSEECOM
+	depends on MSM_SMD
+	help
+	  Provides an interface for OEM driver to communicate with Trustzone
+	  and modem for key exchange and mode change.
+	  This driver uses Secure Channel Manager interface for trustzone
+	  communication and communicates with modem over SMD channel.
 
 endmenu

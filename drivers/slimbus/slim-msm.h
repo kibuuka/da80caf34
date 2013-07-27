@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,7 +17,9 @@
 #include <mach/msm_qmi_interface.h>
 
 /* Per spec.max 40 bytes per received message */
-#define SLIM_RX_MSGQ_BUF_LEN	40
+#define SLIM_MSGQ_BUF_LEN	40
+
+#define MSM_TX_BUFS	2
 
 #define SLIM_USR_MC_GENERIC_ACK		0x25
 #define SLIM_USR_MC_MASTER_CAPABILITY	0x0
@@ -50,6 +52,8 @@
 #define SLIM_MSG_ASM_FIRST_WORD(l, mt, mc, dt, ad) \
 		((l) | ((mt) << 5) | ((mc) << 8) | ((dt) << 15) | ((ad) << 16))
 
+#define INIT_MX_RETRIES 10
+#define DEF_RETRY_MS	10
 #define MSM_CONCUR_MSG	8
 #define SAT_CONCUR_MSG	8
 #define DEF_WATERMARK	(8 << 1)
@@ -152,6 +156,14 @@ enum msm_ctrl_state {
 	MSM_CTRL_AWAKE,
 	MSM_CTRL_SLEEPING,
 	MSM_CTRL_ASLEEP,
+	MSM_CTRL_DOWN,
+};
+
+enum msm_slim_msgq {
+	MSM_MSGQ_DISABLED,
+	MSM_MSGQ_RESET,
+	MSM_MSGQ_ENABLED,
+	MSM_MSGQ_DOWN,
 };
 
 struct msm_slim_sps_bam {
@@ -176,6 +188,8 @@ struct msm_slim_qmi {
 	struct kthread_worker		kworker;
 	struct completion		qmi_comp;
 	struct notifier_block		nb;
+	struct work_struct		ssr_down;
+	struct work_struct		ssr_up;
 };
 
 struct msm_slim_ctrl {
@@ -188,7 +202,8 @@ struct msm_slim_ctrl {
 	u32			curr_bw;
 	u8			msg_cnt;
 	u32			tx_buf[10];
-	u8			rx_msgs[MSM_CONCUR_MSG][SLIM_RX_MSGQ_BUF_LEN];
+	u8			rx_msgs[MSM_CONCUR_MSG][SLIM_MSGQ_BUF_LEN];
+	int			tx_idx;
 	spinlock_t		rx_lock;
 	int			head;
 	int			tail;
@@ -199,6 +214,7 @@ struct msm_slim_ctrl {
 	struct msm_slim_sat	*satd[MSM_MAX_NSATS];
 	struct msm_slim_endp	pipes[7];
 	struct msm_slim_sps_bam	bam;
+	struct msm_slim_endp	tx_msgq;
 	struct msm_slim_endp	rx_msgq;
 	struct completion	rx_msgq_notify;
 	struct task_struct	*rx_msgq_thread;
@@ -206,14 +222,17 @@ struct msm_slim_ctrl {
 	struct clk		*hclk;
 	struct mutex		tx_lock;
 	u8			pgdla;
-	bool			use_rx_msgqs;
+	enum msm_slim_msgq	use_rx_msgqs;
+	enum msm_slim_msgq	use_tx_msgqs;
 	int			pipe_b;
 	struct completion	reconf;
 	bool			reconf_busy;
 	bool			chan_active;
 	enum msm_ctrl_state	state;
+	struct completion	ctrl_up;
 	int			nsats;
 	u32			ver;
+	struct work_struct	slave_notify;
 	struct msm_slim_qmi	qmi;
 };
 
@@ -266,8 +285,14 @@ u32 *msm_get_msg_buf(struct msm_slim_ctrl *dev, int len);
 int msm_slim_rx_msgq_get(struct msm_slim_ctrl *dev, u32 *data, int offset);
 int msm_slim_sps_init(struct msm_slim_ctrl *dev, struct resource *bam_mem,
 			u32 pipe_reg, bool remote);
-void msm_slim_sps_exit(struct msm_slim_ctrl *dev);
+void msm_slim_sps_exit(struct msm_slim_ctrl *dev, bool dereg);
 
+int msm_slim_connect_endp(struct msm_slim_ctrl *dev,
+				struct msm_slim_endp *endpoint,
+				struct completion *notify);
+void msm_slim_disconnect_endp(struct msm_slim_ctrl *dev,
+					struct msm_slim_endp *endpoint,
+					enum msm_slim_msgq *msgq_flag);
 void msm_slim_qmi_exit(struct msm_slim_ctrl *dev);
 int msm_slim_qmi_init(struct msm_slim_ctrl *dev, bool apps_is_master);
 int msm_slim_qmi_power_request(struct msm_slim_ctrl *dev, bool active);

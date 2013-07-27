@@ -1,7 +1,7 @@
 /*
  * TSIF Driver
  *
- * Copyright (c) 2009-2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -216,8 +216,6 @@ static int tsif_get_clocks(struct msm_tsif_device *tsif_device)
 		tsif_device->tsif_clk = clk_get(&tsif_device->pdev->dev,
 						pdata->tsif_clk);
 		if (IS_ERR(tsif_device->tsif_clk)) {
-			dev_err(&tsif_device->pdev->dev, "failed to get %s\n",
-				pdata->tsif_clk);
 			rc = PTR_ERR(tsif_device->tsif_clk);
 			tsif_device->tsif_clk = NULL;
 			goto ret;
@@ -227,8 +225,6 @@ static int tsif_get_clocks(struct msm_tsif_device *tsif_device)
 		tsif_device->tsif_pclk = clk_get(&tsif_device->pdev->dev,
 						 pdata->tsif_pclk);
 		if (IS_ERR(tsif_device->tsif_pclk)) {
-			dev_err(&tsif_device->pdev->dev, "failed to get %s\n",
-				pdata->tsif_pclk);
 			rc = PTR_ERR(tsif_device->tsif_pclk);
 			tsif_device->tsif_pclk = NULL;
 			goto ret;
@@ -238,8 +234,6 @@ static int tsif_get_clocks(struct msm_tsif_device *tsif_device)
 		tsif_device->tsif_ref_clk = clk_get(&tsif_device->pdev->dev,
 						    pdata->tsif_ref_clk);
 		if (IS_ERR(tsif_device->tsif_ref_clk)) {
-			dev_err(&tsif_device->pdev->dev, "failed to get %s\n",
-				pdata->tsif_ref_clk);
 			rc = PTR_ERR(tsif_device->tsif_ref_clk);
 			tsif_device->tsif_ref_clk = NULL;
 			goto ret;
@@ -1431,7 +1425,8 @@ static int __devinit msm_tsif_probe(struct platform_device *pdev)
 		     (unsigned long)tsif_device);
 	tasklet_init(&tsif_device->clocks_off, tsif_clocks_off,
 		     (unsigned long)tsif_device);
-	if (tsif_get_clocks(tsif_device))
+	rc = tsif_get_clocks(tsif_device);
+	if (rc)
 		goto err_clocks;
 /* map I/O memory */
 	tsif_device->memres = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -1769,6 +1764,22 @@ void tsif_stop(void *cookie)
 	action_close(tsif_device);
 }
 EXPORT_SYMBOL(tsif_stop);
+
+int tsif_get_ref_clk_counter(void *cookie, u32 *tcr_counter)
+{
+	struct msm_tsif_device *tsif_device = cookie;
+
+	if (!tsif_device || !tcr_counter)
+		return -EINVAL;
+
+	if (tsif_device->state == tsif_state_running)
+		*tcr_counter = ioread32(tsif_device->base + TSIF_CLK_REF_OFF);
+	else
+		*tcr_counter = 0;
+
+	return 0;
+}
+EXPORT_SYMBOL(tsif_get_ref_clk_counter);
 
 void tsif_reclaim_packets(void *cookie, int read_index)
 {

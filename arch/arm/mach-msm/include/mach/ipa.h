@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -186,6 +186,16 @@ struct ipa_ep_cfg_route {
 };
 
 /**
+ * struct ipa_ep_cfg_holb - head of line blocking configuration in IPA end-point
+ * @en: enable(1 => ok to drop pkt)/disable(0 => never drop pkt)
+ * @tmr_val: duration in units of 128 IPA clk clock cyles [0,511], 1 clk=1.28us
+ */
+struct ipa_ep_cfg_holb {
+	u16 en;
+	u16 tmr_val;
+};
+
+/**
  * struct ipa_ep_cfg - configuration of IPA end-point
  * @nat:	NAT parmeters
  * @hdr:	Header parameters
@@ -200,6 +210,9 @@ struct ipa_ep_cfg {
 	struct ipa_ep_cfg_aggr aggr;
 	struct ipa_ep_cfg_route route;
 };
+
+typedef void (*ipa_notify_cb)(void *priv, enum ipa_dp_evt_type evt,
+		       unsigned long data);
 
 /**
  * struct ipa_connect_params - low-level client connect input parameters. Either
@@ -228,8 +241,7 @@ struct ipa_connect_params {
 	u32 client_bam_hdl;
 	u32 client_ep_idx;
 	void *priv;
-	void (*notify)(void *priv, enum ipa_dp_evt_type evt,
-			unsigned long data);
+	ipa_notify_cb notify;
 	u32 desc_fifo_sz;
 	u32 data_fifo_sz;
 	bool pipe_mem_preferred;
@@ -290,22 +302,7 @@ struct ipa_sys_connect_params {
 	enum ipa_client_type client;
 	u32 desc_fifo_sz;
 	void *priv;
-	void (*notify)(void *priv,
-			enum ipa_dp_evt_type evt,
-			unsigned long data);
-};
-
-/**
- * struct ipa_msg_meta_wrapper - message meta-data wrapper
- * @meta:	the meta-data itself
- * @link:	opaque to client
- * @meta_wrapper_free:	function to free the metadata wrapper when IPA driver
- *			is done with it
- */
-struct ipa_msg_meta_wrapper {
-	struct ipa_msg_meta meta;
-	struct list_head link;
-	void (*meta_wrapper_free)(struct ipa_msg_meta_wrapper *buff);
+	ipa_notify_cb notify;
 };
 
 /**
@@ -319,32 +316,153 @@ struct ipa_tx_meta {
 };
 
 /**
- * struct ipa_msg_wrapper - message wrapper
- * @msg:	the message buffer itself, MUST exist after call returns, will
- *		be freed by IPA driver when it is done with it
- * @link:	opaque to client
- * @msg_free:	function to free the message when IPA driver is done with it
- * @msg_wrapper_free:	function to free the message wrapper when IPA driver is
- *			done with it
+ * typedef ipa_msg_free_fn - callback function
+ * @param buff - [in] the message payload to free
+ * @param len - [in] size of message payload
+ * @param type - [in] the message type
+ *
+ * Message callback registered by kernel client with IPA driver to
+ * free message payload after IPA driver processing is complete
+ *
+ * No return value
  */
-struct ipa_msg_wrapper {
-	void *msg;
-	struct list_head link;
-	void (*msg_free)(void *msg);
-	void (*msg_wrapper_free)(struct ipa_msg_wrapper *buff);
+typedef void (*ipa_msg_free_fn)(void *buff, u32 len, u32 type);
+
+/**
+ * typedef ipa_msg_pull_fn - callback function
+ * @param buff - [in] where to copy message payload
+ * @param len - [in] size of buffer to copy payload into
+ * @param type - [in] the message type
+ *
+ * Message callback registered by kernel client with IPA driver for
+ * IPA driver to pull messages from the kernel client upon demand from
+ * user-space
+ *
+ * Returns how many bytes were copied into the buffer.
+ */
+typedef int (*ipa_msg_pull_fn)(void *buff, u32 len, u32 type);
+
+/**
+ * enum ipa_bridge_dir - direction of the bridge from air interface perspective
+ *
+ * IPA bridge direction
+ */
+enum ipa_bridge_dir {
+	IPA_BRIDGE_DIR_DL,
+	IPA_BRIDGE_DIR_UL,
+	IPA_BRIDGE_DIR_MAX
 };
 
 /**
- * typedef ipa_pull_fn - callback function
- * @buf - [in] the buffer to populate the message into
- * @sz - [in] the size of the buffer
+ * enum ipa_bridge_type - type of SW bridge
  *
- * callback function registered by kernel client with IPA driver for IPA driver
- * to be able to pull messages from the kernel client asynchronously.
- *
- * Returns how many bytes were copied into the buffer, negative on failure.
+ * IPA bridge type
  */
-typedef int (*ipa_pull_fn)(void *buf, uint16_t sz);
+enum ipa_bridge_type {
+	IPA_BRIDGE_TYPE_TETHERED,
+	IPA_BRIDGE_TYPE_EMBEDDED,
+	IPA_BRIDGE_TYPE_MAX
+};
+
+/**
+ * enum ipa_rm_event - IPA RM events
+ *
+ * Indicate the resource state change
+ */
+enum ipa_rm_event {
+	IPA_RM_RESOURCE_GRANTED,
+	IPA_RM_RESOURCE_RELEASED
+};
+
+typedef void (*ipa_rm_notify_cb)(void *user_data,
+		enum ipa_rm_event event,
+		unsigned long data);
+/**
+ * struct ipa_rm_register_params - information needed to
+ *      register IPA RM client with IPA RM
+ *
+ * @user_data: IPA RM client provided information
+ *		to be passed to notify_cb callback below
+ * @notify_cb: callback which is called by resource
+ *		to notify the IPA RM client about its state
+ *		change IPA RM client is expected to perform non
+ *		blocking operations only in notify_cb and
+ *		release notification context as soon as
+ *		possible.
+ */
+struct ipa_rm_register_params {
+	void *user_data;
+	ipa_rm_notify_cb notify_cb;
+};
+
+/**
+ * struct ipa_rm_create_params - information needed to initialize
+ *				the resource
+ * @name: resource name
+ * @reg_params: register parameters, contains are ignored
+ *		for consumer resource NULL should be provided
+ *		for consumer resource
+ * @request_resource: function which should be called to request resource,
+ *			NULL should be provided for producer resource
+ * @release_resource: function which should be called to release resource,
+ *			NULL should be provided for producer resource
+ *
+ * IPA RM client is expected to perform non blocking operations only
+ * in request_resource and release_resource functions and
+ * release notification context as soon as possible.
+ */
+struct ipa_rm_create_params {
+	enum ipa_rm_resource_name name;
+	struct ipa_rm_register_params reg_params;
+	int (*request_resource)(void);
+	int (*release_resource)(void);
+};
+
+#define A2_MUX_HDR_NAME_V4_PREF "dmux_hdr_v4_"
+#define A2_MUX_HDR_NAME_V6_PREF "dmux_hdr_v6_"
+
+enum a2_mux_event_type {
+	A2_MUX_RECEIVE,
+	A2_MUX_WRITE_DONE
+};
+
+enum a2_mux_logical_channel_id {
+	A2_MUX_WWAN_0,
+	A2_MUX_WWAN_1,
+	A2_MUX_WWAN_2,
+	A2_MUX_WWAN_3,
+	A2_MUX_WWAN_4,
+	A2_MUX_WWAN_5,
+	A2_MUX_WWAN_6,
+	A2_MUX_WWAN_7,
+	A2_MUX_TETHERED_0,
+	A2_MUX_NUM_CHANNELS
+};
+
+typedef void (*a2_mux_notify_cb)(void *user_data,
+		enum a2_mux_event_type event,
+		unsigned long data);
+
+/**
+ * enum teth_tethering_mode - Tethering mode (Rmnet / MBIM)
+ */
+enum teth_tethering_mode {
+	TETH_TETHERING_MODE_RMNET,
+	TETH_TETHERING_MODE_MBIM,
+	TETH_TETHERING_MODE_MAX,
+};
+
+/**
+ * struct teth_bridge_connect_params - Parameters used in teth_bridge_connect()
+ * @ipa_usb_pipe_hdl:	IPA to USB pipe handle, returned from ipa_connect()
+ * @usb_ipa_pipe_hdl:	USB to IPA pipe handle, returned from ipa_connect()
+ * @tethering_mode:	Rmnet or MBIM
+ */
+struct teth_bridge_connect_params {
+	u32 ipa_usb_pipe_hdl;
+	u32 usb_ipa_pipe_hdl;
+	enum teth_tethering_mode tethering_mode;
+};
 
 #ifdef CONFIG_IPA
 
@@ -354,6 +472,13 @@ typedef int (*ipa_pull_fn)(void *buf, uint16_t sz);
 int ipa_connect(const struct ipa_connect_params *in, struct ipa_sps_params *sps,
 		u32 *clnt_hdl);
 int ipa_disconnect(u32 clnt_hdl);
+
+/*
+ * Resume / Suspend
+ */
+int ipa_resume(u32 clnt_hdl);
+
+int ipa_suspend(u32 clnt_hdl);
 
 /*
  * Configuration
@@ -369,6 +494,11 @@ int ipa_cfg_ep_mode(u32 clnt_hdl, const struct ipa_ep_cfg_mode *ipa_ep_cfg);
 int ipa_cfg_ep_aggr(u32 clnt_hdl, const struct ipa_ep_cfg_aggr *ipa_ep_cfg);
 
 int ipa_cfg_ep_route(u32 clnt_hdl, const struct ipa_ep_cfg_route *ipa_ep_cfg);
+
+int ipa_cfg_ep_holb(u32 clnt_hdl, const struct ipa_ep_cfg_holb *ipa_ep_cfg);
+
+int ipa_cfg_ep_holb_by_client(enum ipa_client_type client,
+				const struct ipa_ep_cfg_holb *ipa_ep_cfg);
 
 /*
  * Header removal / addition
@@ -425,6 +555,21 @@ int ipa_nat_dma_cmd(struct ipa_ioc_nat_dma_cmd *dma);
 int ipa_nat_del_cmd(struct ipa_ioc_v4_nat_del *del);
 
 /*
+ * Messaging
+ */
+int ipa_send_msg(struct ipa_msg_meta *meta, void *buff,
+		  ipa_msg_free_fn callback);
+int ipa_register_pull_msg(struct ipa_msg_meta *meta, ipa_msg_pull_fn callback);
+int ipa_deregister_pull_msg(struct ipa_msg_meta *meta);
+
+/*
+ * Interface
+ */
+int ipa_register_intf(const char *name, const struct ipa_tx_intf *tx,
+		       const struct ipa_rx_intf *rx);
+int ipa_deregister_intf(const char *name);
+
+/*
  * Aggregation
  */
 int ipa_set_aggr_mode(enum ipa_aggr_mode mode);
@@ -434,15 +579,13 @@ int ipa_set_qcncm_ndp_sig(char sig[3]);
 int ipa_set_single_ndp_per_mbim(bool enable);
 
 /*
- * rmnet bridge
+ * SW bridge (between IPA and A2)
  */
-int rmnet_bridge_init(void);
+int ipa_bridge_setup(enum ipa_bridge_dir dir, enum ipa_bridge_type type,
+		     struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl);
+int ipa_bridge_teardown(enum ipa_bridge_dir dir, enum ipa_bridge_type type,
+			u32 clnt_hdl);
 
-int rmnet_bridge_disconnect(void);
-
-int rmnet_bridge_connect(u32 producer_hdl,
-			 u32 consumer_hdl,
-			 int wwan_logical_channel_id);
 
 /*
  * Data path
@@ -457,7 +600,108 @@ int ipa_setup_sys_pipe(struct ipa_sys_connect_params *sys_in, u32 *clnt_hdl);
 
 int ipa_teardown_sys_pipe(u32 clnt_hdl);
 
+/*
+ * Resource manager
+ */
+int ipa_rm_create_resource(struct ipa_rm_create_params *create_params);
+
+int ipa_rm_delete_resource(enum ipa_rm_resource_name resource_name);
+
+int ipa_rm_register(enum ipa_rm_resource_name resource_name,
+			struct ipa_rm_register_params *reg_params);
+
+int ipa_rm_deregister(enum ipa_rm_resource_name resource_name,
+			struct ipa_rm_register_params *reg_params);
+
+int ipa_rm_add_dependency(enum ipa_rm_resource_name resource_name,
+			enum ipa_rm_resource_name depends_on_name);
+
+int ipa_rm_delete_dependency(enum ipa_rm_resource_name resource_name,
+			enum ipa_rm_resource_name depends_on_name);
+
+int ipa_rm_request_resource(enum ipa_rm_resource_name resource_name);
+
+int ipa_rm_release_resource(enum ipa_rm_resource_name resource_name);
+
+int ipa_rm_notify_completion(enum ipa_rm_event event,
+		enum ipa_rm_resource_name resource_name);
+
+int ipa_rm_inactivity_timer_init(enum ipa_rm_resource_name resource_name,
+				 unsigned long msecs);
+
+int ipa_rm_inactivity_timer_destroy(enum ipa_rm_resource_name resource_name);
+
+int ipa_rm_inactivity_timer_request_resource(
+				enum ipa_rm_resource_name resource_name);
+
+int ipa_rm_inactivity_timer_release_resource(
+				enum ipa_rm_resource_name resource_name);
+
+/*
+ * a2 service
+ */
+int a2_mux_open_channel(enum a2_mux_logical_channel_id lcid,
+			void *user_data,
+			a2_mux_notify_cb notify_cb);
+
+int a2_mux_close_channel(enum a2_mux_logical_channel_id lcid);
+
+int a2_mux_write(enum a2_mux_logical_channel_id lcid, struct sk_buff *skb);
+
+int a2_mux_is_ch_low(enum a2_mux_logical_channel_id lcid);
+
+int a2_mux_is_ch_full(enum a2_mux_logical_channel_id lcid);
+
+int a2_mux_get_tethered_client_handles(enum a2_mux_logical_channel_id lcid,
+		unsigned int *clnt_cons_handle,
+		unsigned int *clnt_prod_handle);
+
+/*
+ * Tethering bridge (Rmnet / MBIM)
+ */
+int teth_bridge_init(ipa_notify_cb *usb_notify_cb_ptr, void **private_data_ptr);
+
+int teth_bridge_disconnect(void);
+
+int teth_bridge_connect(struct teth_bridge_connect_params *connect_params);
+
+int teth_bridge_set_aggr_params(struct teth_aggr_params *aggr_params);
+
 #else /* CONFIG_IPA */
+
+static inline int a2_mux_open_channel(enum a2_mux_logical_channel_id lcid,
+	void *user_data, a2_mux_notify_cb notify_cb)
+{
+	return -EPERM;
+}
+
+static inline int a2_mux_close_channel(enum a2_mux_logical_channel_id lcid)
+{
+	return -EPERM;
+}
+
+static inline int a2_mux_write(enum a2_mux_logical_channel_id lcid,
+			       struct sk_buff *skb)
+{
+	return -EPERM;
+}
+
+static inline int a2_mux_is_ch_low(enum a2_mux_logical_channel_id lcid)
+{
+	return -EPERM;
+}
+
+static inline int a2_mux_is_ch_full(enum a2_mux_logical_channel_id lcid)
+{
+	return -EPERM;
+}
+
+static inline int a2_mux_get_tethered_client_handles(
+	enum a2_mux_logical_channel_id lcid, unsigned int *clnt_cons_handle,
+	unsigned int *clnt_prod_handle)
+{
+	return -EPERM;
+}
 
 /*
  * Connect / Disconnect
@@ -473,6 +717,18 @@ static inline int ipa_disconnect(u32 clnt_hdl)
 	return -EPERM;
 }
 
+/*
+ * Resume / Suspend
+ */
+static inline int ipa_resume(u32 clnt_hdl)
+{
+	return -EPERM;
+}
+
+static inline int ipa_suspend(u32 clnt_hdl)
+{
+	return -EPERM;
+}
 
 /*
  * Configuration
@@ -483,13 +739,11 @@ static inline int ipa_cfg_ep(u32 clnt_hdl,
 	return -EPERM;
 }
 
-
 static inline int ipa_cfg_ep_nat(u32 clnt_hdl,
 		const struct ipa_ep_cfg_nat *ipa_ep_cfg)
 {
 	return -EPERM;
 }
-
 
 static inline int ipa_cfg_ep_hdr(u32 clnt_hdl,
 		const struct ipa_ep_cfg_hdr *ipa_ep_cfg)
@@ -497,13 +751,11 @@ static inline int ipa_cfg_ep_hdr(u32 clnt_hdl,
 	return -EPERM;
 }
 
-
 static inline int ipa_cfg_ep_mode(u32 clnt_hdl,
 		const struct ipa_ep_cfg_mode *ipa_ep_cfg)
 {
 	return -EPERM;
 }
-
 
 static inline int ipa_cfg_ep_aggr(u32 clnt_hdl,
 		const struct ipa_ep_cfg_aggr *ipa_ep_cfg)
@@ -511,13 +763,17 @@ static inline int ipa_cfg_ep_aggr(u32 clnt_hdl,
 	return -EPERM;
 }
 
-
 static inline int ipa_cfg_ep_route(u32 clnt_hdl,
 		const struct ipa_ep_cfg_route *ipa_ep_cfg)
 {
 	return -EPERM;
 }
 
+static inline int ipa_cfg_ep_holb(u32 clnt_hdl,
+		const struct ipa_ep_cfg_holb *ipa_ep_cfg)
+{
+	return -EPERM;
+}
 
 /*
  * Header removal / addition
@@ -527,42 +783,35 @@ static inline int ipa_add_hdr(struct ipa_ioc_add_hdr *hdrs)
 	return -EPERM;
 }
 
-
 static inline int ipa_del_hdr(struct ipa_ioc_del_hdr *hdls)
 {
 	return -EPERM;
 }
-
 
 static inline int ipa_commit_hdr(void)
 {
 	return -EPERM;
 }
 
-
 static inline int ipa_reset_hdr(void)
 {
 	return -EPERM;
 }
-
 
 static inline int ipa_get_hdr(struct ipa_ioc_get_hdr *lookup)
 {
 	return -EPERM;
 }
 
-
 static inline int ipa_put_hdr(u32 hdr_hdl)
 {
 	return -EPERM;
 }
 
-
 static inline int ipa_copy_hdr(struct ipa_ioc_copy_hdr *copy)
 {
 	return -EPERM;
 }
-
 
 /*
  * Routing
@@ -572,36 +821,30 @@ static inline int ipa_add_rt_rule(struct ipa_ioc_add_rt_rule *rules)
 	return -EPERM;
 }
 
-
 static inline int ipa_del_rt_rule(struct ipa_ioc_del_rt_rule *hdls)
 {
 	return -EPERM;
 }
-
 
 static inline int ipa_commit_rt(enum ipa_ip_type ip)
 {
 	return -EPERM;
 }
 
-
 static inline int ipa_reset_rt(enum ipa_ip_type ip)
 {
 	return -EPERM;
 }
-
 
 static inline int ipa_get_rt_tbl(struct ipa_ioc_get_rt_tbl *lookup)
 {
 	return -EPERM;
 }
 
-
 static inline int ipa_put_rt_tbl(u32 rt_tbl_hdl)
 {
 	return -EPERM;
 }
-
 
 /*
  * Filtering
@@ -611,24 +854,20 @@ static inline int ipa_add_flt_rule(struct ipa_ioc_add_flt_rule *rules)
 	return -EPERM;
 }
 
-
 static inline int ipa_del_flt_rule(struct ipa_ioc_del_flt_rule *hdls)
 {
 	return -EPERM;
 }
-
 
 static inline int ipa_commit_flt(enum ipa_ip_type ip)
 {
 	return -EPERM;
 }
 
-
 static inline int ipa_reset_flt(enum ipa_ip_type ip)
 {
 	return -EPERM;
 }
-
 
 /*
  * NAT
@@ -656,6 +895,40 @@ static inline int ipa_nat_del_cmd(struct ipa_ioc_v4_nat_del *del)
 	return -EPERM;
 }
 
+/*
+ * Messaging
+ */
+static inline int ipa_send_msg(struct ipa_msg_meta *meta, void *buff,
+		ipa_msg_free_fn callback)
+{
+	return -EPERM;
+}
+
+static inline int ipa_register_pull_msg(struct ipa_msg_meta *meta,
+		ipa_msg_pull_fn callback)
+{
+	return -EPERM;
+}
+
+static inline int ipa_deregister_pull_msg(struct ipa_msg_meta *meta)
+{
+	return -EPERM;
+}
+
+/*
+ * Interface
+ */
+static inline int ipa_register_intf(const char *name,
+				     const struct ipa_tx_intf *tx,
+				     const struct ipa_rx_intf *rx)
+{
+	return -EPERM;
+}
+
+static inline int ipa_deregister_intf(const char *name)
+{
+	return -EPERM;
+}
 
 /*
  * Aggregation
@@ -665,41 +938,33 @@ static inline int ipa_set_aggr_mode(enum ipa_aggr_mode mode)
 	return -EPERM;
 }
 
-
 static inline int ipa_set_qcncm_ndp_sig(char sig[3])
 {
 	return -EPERM;
 }
-
 
 static inline int ipa_set_single_ndp_per_mbim(bool enable)
 {
 	return -EPERM;
 }
 
-
 /*
- * rmnet bridge
+ * SW bridge (between IPA and A2)
  */
-static inline int rmnet_bridge_init(void)
+static inline int ipa_bridge_setup(enum ipa_bridge_dir dir,
+				    enum ipa_bridge_type type,
+				    struct ipa_sys_connect_params *sys_in,
+				    u32 *clnt_hdl)
 {
 	return -EPERM;
 }
 
-
-static inline int rmnet_bridge_disconnect(void)
+static inline int ipa_bridge_teardown(enum ipa_bridge_dir dir,
+				       enum ipa_bridge_type type,
+				      u32 clnt_hdl)
 {
 	return -EPERM;
 }
-
-
-static inline int rmnet_bridge_connect(u32 producer_hdl,
-			 u32 consumer_hdl,
-			 int wwan_logical_channel_id)
-{
-	return -EPERM;
-}
-
 
 /*
  * Data path
@@ -710,7 +975,6 @@ static inline int ipa_tx_dp(enum ipa_client_type dst, struct sk_buff *skb,
 	return -EPERM;
 }
 
-
 /*
  * System pipes
  */
@@ -720,12 +984,120 @@ static inline int ipa_setup_sys_pipe(struct ipa_sys_connect_params *sys_in,
 	return -EPERM;
 }
 
-
 static inline int ipa_teardown_sys_pipe(u32 clnt_hdl)
 {
 	return -EPERM;
 }
 
+/*
+ * Resource manager
+ */
+static inline int ipa_rm_create_resource(
+		struct ipa_rm_create_params *create_params)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_delete_resource(
+		enum ipa_rm_resource_name resource_name)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_register(enum ipa_rm_resource_name resource_name,
+			struct ipa_rm_register_params *reg_params)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_deregister(enum ipa_rm_resource_name resource_name,
+			struct ipa_rm_register_params *reg_params)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_add_dependency(
+		enum ipa_rm_resource_name resource_name,
+		enum ipa_rm_resource_name depends_on_name)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_delete_dependency(
+		enum ipa_rm_resource_name resource_name,
+		enum ipa_rm_resource_name depends_on_name)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_request_resource(
+		enum ipa_rm_resource_name resource_name)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_release_resource(
+		enum ipa_rm_resource_name resource_name)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_notify_completion(enum ipa_rm_event event,
+		enum ipa_rm_resource_name resource_name)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_inactivity_timer_init(
+		enum ipa_rm_resource_name resource_name,
+			unsigned long msecs)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_inactivity_timer_destroy(
+		enum ipa_rm_resource_name resource_name)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_inactivity_timer_request_resource(
+				enum ipa_rm_resource_name resource_name)
+{
+	return -EPERM;
+}
+
+static inline int ipa_rm_inactivity_timer_release_resource(
+				enum ipa_rm_resource_name resource_name)
+{
+	return -EPERM;
+}
+
+/*
+ * Tethering bridge (Rmnetm / MBIM)
+ */
+static inline int teth_bridge_init(ipa_notify_cb *usb_notify_cb_ptr,
+				   void **private_data_ptr)
+{
+	return -EPERM;
+}
+
+static inline int teth_bridge_disconnect(void)
+{
+	return -EPERM;
+}
+
+static inline int teth_bridge_connect(struct teth_bridge_connect_params
+				      *connect_params)
+{
+	return -EPERM;
+}
+
+static inline int teth_bridge_set_aggr_params(struct teth_aggr_params
+					      *aggr_params)
+{
+	return -EPERM;
+}
 
 #endif /* CONFIG_IPA*/
 

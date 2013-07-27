@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,9 +21,8 @@
 struct subsys_device;
 
 enum {
-	RESET_SOC = 1,
+	RESET_SOC = 0,
 	RESET_SUBSYS_COUPLED,
-	RESET_SUBSYS_INDEPENDENT,
 	RESET_LEVEL_MAX
 };
 
@@ -42,6 +41,8 @@ struct module;
  * @powerup: Start a subsystem
  * @crash_shutdown: Shutdown a subsystem when the system crashes (can't sleep)
  * @ramdump: Collect a ramdump of the subsystem
+ * @is_not_loadable: Indicate if subsystem firmware is not loadable via pil
+ * framework
  */
 struct subsys_desc {
 	const char *name;
@@ -56,11 +57,13 @@ struct subsys_desc {
 	int (*powerup)(const struct subsys_desc *desc);
 	void (*crash_shutdown)(const struct subsys_desc *desc);
 	int (*ramdump)(int, const struct subsys_desc *desc);
+	unsigned int err_ready_irq;
+	int is_not_loadable;
 };
 
 #if defined(CONFIG_MSM_SUBSYSTEM_RESTART)
 
-extern int get_restart_level(void);
+extern int subsys_get_restart_level(struct subsys_device *dev);
 extern int subsystem_restart_dev(struct subsys_device *dev);
 extern int subsystem_restart(const char *name);
 extern int subsystem_crashed(const char *name);
@@ -75,7 +78,7 @@ extern void subsys_default_online(struct subsys_device *dev);
 
 #else
 
-static inline int get_restart_level(void)
+static inline int subsys_get_restart_level(struct subsys_device *dev)
 {
 	return 0;
 }

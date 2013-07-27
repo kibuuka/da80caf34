@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2008-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -46,7 +46,11 @@
 #define KGSL_PAGETABLE_ENTRY_SIZE  4
 
 /* Pagetable Virtual Address base */
+#ifndef CONFIG_MSM_KGSL_CFF_DUMP
 #define KGSL_PAGETABLE_BASE	0x10000000
+#else
+#define KGSL_PAGETABLE_BASE	0xE0000000
+#endif
 
 /* Extra accounting entries needed in the pagetable */
 #define KGSL_PT_EXTRA_ENTRIES      16
@@ -89,6 +93,7 @@ struct kgsl_memfree_hist {
 
 
 struct kgsl_device;
+struct kgsl_context;
 
 struct kgsl_driver {
 	struct cdev cdev;
@@ -129,6 +134,7 @@ struct kgsl_driver {
 		unsigned int mapped_max;
 		unsigned int histogram[16];
 	} stats;
+	unsigned int full_cache_threshold;
 };
 
 extern struct kgsl_driver kgsl_driver;
@@ -148,6 +154,10 @@ struct kgsl_memdesc_ops {
 #define KGSL_MEMDESC_GUARD_PAGE BIT(0)
 /* Set if the memdesc is mapped into all pagetables */
 #define KGSL_MEMDESC_GLOBAL BIT(1)
+/* The memdesc is frozen during a snapshot */
+#define KGSL_MEMDESC_FROZEN BIT(2)
+/* The memdesc is scheduled to be freed on a timestamp */
+#define KGSL_MEMDESC_FREE_PENDING BIT(3)
 
 /* shared memory allocation */
 struct kgsl_memdesc {
@@ -155,7 +165,7 @@ struct kgsl_memdesc {
 	void *hostptr; /* kernel virtual address */
 	unsigned long useraddr; /* userspace address */
 	unsigned int gpuaddr;
-	unsigned int physaddr;
+	phys_addr_t physaddr;
 	unsigned int size;
 	unsigned int priv; /* Internal flags and settings */
 	struct scatterlist *sg;
@@ -174,15 +184,10 @@ struct kgsl_memdesc {
 #define KGSL_MEM_ENTRY_ION    4
 #define KGSL_MEM_ENTRY_MAX    5
 
-/* List of flags */
-
-#define KGSL_MEM_ENTRY_FROZEN (1 << 0)
-
 struct kgsl_mem_entry {
 	struct kref refcount;
 	struct kgsl_memdesc memdesc;
 	int memtype;
-	int flags;
 	void *priv_data;
 	struct rb_node node;
 	unsigned int id;
@@ -202,7 +207,7 @@ void kgsl_mem_entry_destroy(struct kref *kref);
 int kgsl_postmortem_dump(struct kgsl_device *device, int manual);
 
 struct kgsl_mem_entry *kgsl_get_mem_entry(struct kgsl_device *device,
-		unsigned int ptbase, unsigned int gpuaddr, unsigned int size);
+		phys_addr_t ptbase, unsigned int gpuaddr, unsigned int size);
 
 struct kgsl_mem_entry *kgsl_sharedmem_find_region(
 	struct kgsl_process_private *private, unsigned int gpuaddr,
@@ -217,13 +222,25 @@ int kgsl_add_event(struct kgsl_device *device, u32 id, u32 ts,
 void kgsl_cancel_events(struct kgsl_device *device,
 	void *owner);
 
+void kgsl_cancel_events_ctxt(struct kgsl_device *device,
+	struct kgsl_context *context);
+
 extern const struct dev_pm_ops kgsl_pm_ops;
 
-struct early_suspend;
 int kgsl_suspend_driver(struct platform_device *pdev, pm_message_t state);
 int kgsl_resume_driver(struct platform_device *pdev);
-void kgsl_early_suspend_driver(struct early_suspend *h);
-void kgsl_late_resume_driver(struct early_suspend *h);
+
+void kgsl_trace_regwrite(struct kgsl_device *device, unsigned int offset,
+		unsigned int value);
+
+void kgsl_trace_issueibcmds(struct kgsl_device *device, int id,
+		struct kgsl_ibdesc *ibdesc, int numibs,
+		unsigned int timestamp, unsigned int flags,
+		int result, unsigned int type);
+
+int kgsl_open_device(struct kgsl_device *device);
+
+int kgsl_close_device(struct kgsl_device *device);
 
 #ifdef CONFIG_MSM_KGSL_DRM
 extern int kgsl_drm_init(struct platform_device *dev);
@@ -242,6 +259,10 @@ static inline void kgsl_drm_exit(void)
 static inline int kgsl_gpuaddr_in_memdesc(const struct kgsl_memdesc *memdesc,
 				unsigned int gpuaddr, unsigned int size)
 {
+	/* set a minimum size to search for */
+	if (!size)
+		size = 1;
+
 	/* don't overflow */
 	if ((gpuaddr + size) < gpuaddr)
 		return 0;

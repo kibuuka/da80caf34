@@ -1,7 +1,7 @@
 /* arch/arm/mach-msm/qdsp6/audiov2/q6audio.c
  *
  * Copyright (C) 2009 Google, Inc.
- * Copyright (c) 2009, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2009, The Linux Foundation. All rights reserved.
  *
  * Author: Brian Swetland <swetland@google.com>
  *
@@ -23,7 +23,6 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/wakelock.h>
-#include <linux/android_pmem.h>
 #include <linux/gpio.h>
 #include <linux/pm_qos.h>
 

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -625,8 +625,13 @@ static int shelby_phy_init_seq[] = {
 #define USB_BAM_PHY_BASE	0x12502000
 #define HSIC_BAM_PHY_BASE	0x12542000
 #define A2_BAM_PHY_BASE		0x124C2000
-static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
-	[HSUSB_BAM][0][USB_TO_PEER_PERIPHERAL] = {
+static struct usb_bam_pipe_connect msm_usb_bam_connections[] = {
+	{
+		.name = "hsusb-a2-out-0",
+		.bam_type = HSUSB_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = USB_TO_PEER_PERIPHERAL,
+		.pipe_num = 0,
 		.src_phy_addr = USB_BAM_PHY_BASE,
 		.src_pipe_index = 11,
 		.dst_phy_addr = A2_BAM_PHY_BASE,
@@ -636,7 +641,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x1700,
 		.desc_fifo_size = 0x300,
 	},
-	[HSUSB_BAM][0][PEER_PERIPHERAL_TO_USB] = {
+	{
+		.name = "hsusb-a2-in-0",
+		.bam_type = HSUSB_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = PEER_PERIPHERAL_TO_USB,
+		.pipe_num = 0,
 		.src_phy_addr = A2_BAM_PHY_BASE,
 		.src_pipe_index = 1,
 		.dst_phy_addr = USB_BAM_PHY_BASE,
@@ -646,7 +656,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x1000,
 		.desc_fifo_size = 0x100,
 	},
-	[HSUSB_BAM][1][USB_TO_PEER_PERIPHERAL] = {
+	{
+		.name = "hsusb-a2-out-1",
+		.bam_type = HSUSB_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = USB_TO_PEER_PERIPHERAL,
+		.pipe_num = 1,
 		.src_phy_addr = USB_BAM_PHY_BASE,
 		.src_pipe_index = 13,
 		.dst_phy_addr = A2_BAM_PHY_BASE,
@@ -656,7 +671,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x2700,
 		.desc_fifo_size = 0x300,
 	},
-	[HSUSB_BAM][1][PEER_PERIPHERAL_TO_USB] = {
+	{
+		.name = "hsusb-a2-in-1",
+		.bam_type = HSUSB_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = PEER_PERIPHERAL_TO_USB,
+		.pipe_num = 1,
 		.src_phy_addr = A2_BAM_PHY_BASE,
 		.src_pipe_index = 3,
 		.dst_phy_addr = USB_BAM_PHY_BASE,
@@ -666,7 +686,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x2000,
 		.desc_fifo_size = 0x100,
 	},
-	[HSUSB_BAM][2][USB_TO_PEER_PERIPHERAL] = {
+	{
+		.name = "hsusb-a2-out-2",
+		.bam_type = HSUSB_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = USB_TO_PEER_PERIPHERAL,
+		.pipe_num = 2,
 		.src_phy_addr = USB_BAM_PHY_BASE,
 		.src_pipe_index = 15,
 		.dst_phy_addr = A2_BAM_PHY_BASE,
@@ -676,7 +701,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x3700,
 		.desc_fifo_size = 0x300,
 	},
-	[HSUSB_BAM][2][PEER_PERIPHERAL_TO_USB] = {
+	{
+		.name = "hsusb-a2-in-2",
+		.bam_type = HSUSB_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = PEER_PERIPHERAL_TO_USB,
+		.pipe_num = 2,
 		.src_phy_addr = A2_BAM_PHY_BASE,
 		.src_pipe_index = 5,
 		.dst_phy_addr = USB_BAM_PHY_BASE,
@@ -686,7 +716,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x3000,
 		.desc_fifo_size = 0x100,
 	},
-	[HSIC_BAM][0][USB_TO_PEER_PERIPHERAL] = {
+	{
+		.name = "hsic-a2-out-0",
+		.bam_type = HSIC_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = USB_TO_PEER_PERIPHERAL,
+		.pipe_num = 0,
 		.src_phy_addr = HSIC_BAM_PHY_BASE,
 		.src_pipe_index = 1,
 		.dst_phy_addr = A2_BAM_PHY_BASE,
@@ -696,7 +731,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x1700,
 		.desc_fifo_size = 0x300,
 	},
-	[HSIC_BAM][0][PEER_PERIPHERAL_TO_USB] = {
+	{
+		.name = "hsic-a2-in-0",
+		.bam_type = HSIC_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = PEER_PERIPHERAL_TO_USB,
+		.pipe_num = 0,
 		.src_phy_addr = A2_BAM_PHY_BASE,
 		.src_pipe_index = 1,
 		.dst_phy_addr = HSIC_BAM_PHY_BASE,
@@ -706,7 +746,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x1000,
 		.desc_fifo_size = 0x100,
 	},
-	[HSIC_BAM][1][USB_TO_PEER_PERIPHERAL] = {
+	{
+		.name = "hsic-a2-out-1",
+		.bam_type = HSIC_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = USB_TO_PEER_PERIPHERAL,
+		.pipe_num = 1,
 		.src_phy_addr = HSIC_BAM_PHY_BASE,
 		.src_pipe_index = 3,
 		.dst_phy_addr = A2_BAM_PHY_BASE,
@@ -716,7 +761,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x2700,
 		.desc_fifo_size = 0x300,
 	},
-	[HSIC_BAM][1][PEER_PERIPHERAL_TO_USB] = {
+	{
+		.name = "hsic-a2-in-1",
+		.bam_type = HSIC_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = PEER_PERIPHERAL_TO_USB,
+		.pipe_num = 1,
 		.src_phy_addr = A2_BAM_PHY_BASE,
 		.src_pipe_index = 3,
 		.dst_phy_addr = HSIC_BAM_PHY_BASE,
@@ -726,7 +776,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x2000,
 		.desc_fifo_size = 0x100,
 	},
-	[HSIC_BAM][2][USB_TO_PEER_PERIPHERAL] = {
+	{
+		.name = "hsic-a2-out-2",
+		.bam_type = HSIC_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = USB_TO_PEER_PERIPHERAL,
+		.pipe_num = 2,
 		.src_phy_addr = HSIC_BAM_PHY_BASE,
 		.src_pipe_index = 5,
 		.dst_phy_addr = A2_BAM_PHY_BASE,
@@ -736,7 +791,12 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 		.desc_fifo_base_offset = 0x3700,
 		.desc_fifo_size = 0x300,
 	},
-	[HSIC_BAM][2][PEER_PERIPHERAL_TO_USB] = {
+	{
+		.name = "hsic-a2-in-2",
+		.bam_type = HSIC_BAM,
+		.peer_bam = A2_P_BAM,
+		.dir = PEER_PERIPHERAL_TO_USB,
+		.pipe_num = 2,
 		.src_phy_addr = A2_BAM_PHY_BASE,
 		.src_pipe_index = 5,
 		.dst_phy_addr = HSIC_BAM_PHY_BASE,
@@ -749,12 +809,9 @@ static struct usb_bam_pipe_connect msm_usb_bam_connections[MAX_BAMS][8][2] = {
 };
 
 static struct msm_usb_bam_platform_data msm_usb_bam_pdata = {
-	.connections = &msm_usb_bam_connections[0][0][0],
-#ifndef CONFIG_USB_CI13XXX_MSM_HSIC
-	.usb_active_bam = HSUSB_BAM,
-#else
-	.usb_active_bam = HSIC_BAM,
-#endif
+	.connections = &msm_usb_bam_connections[0],
+	.max_connections = sizeof(msm_usb_bam_connections) /
+		sizeof(struct usb_bam_pipe_connect),
 	.usb_bam_num_pipes = 16,
 };
 
@@ -782,6 +839,10 @@ static struct msm_hsic_peripheral_platform_data
 static struct ci13xxx_platform_data msm_hsic_peripheral_pdata = {
 	.usb_core_id = 1,
 	.prv_data = &msm_hsic_peripheral_pdata_private,
+};
+
+static struct msm_hsic_host_platform_data msm_hsic_pdata = {
+	.phy_sof_workaround	= true,
 };
 
 #define PID_MAGIC_ID		0x71432909
@@ -915,6 +976,7 @@ static struct platform_device *common_devices[] = {
 	&msm_stub_codec,
 	&msm_voice,
 	&msm_dtmf,
+	&msm_host_pcm_voice,
 	&msm_voip,
 	&msm_i2s_cpudai0,
 	&msm_i2s_cpudai1,
@@ -1015,6 +1077,7 @@ static void __init msm9615_common_init(void)
 		&msm_peripheral_pdata;
 	msm_device_hsic_peripheral.dev.platform_data =
 		&msm_hsic_peripheral_pdata;
+	msm_device_hsic_host.dev.platform_data = &msm_hsic_pdata;
 	msm_device_usb_bam.dev.platform_data = &msm_usb_bam_pdata;
 	platform_add_devices(common_devices, ARRAY_SIZE(common_devices));
 	msm9615_pm8xxx_gpio_mpp_init();

@@ -1,5 +1,5 @@
 
-/* Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2008-2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1130,14 +1130,28 @@ int mipi_dsi_cmd_reg_tx(uint32 data)
 	return 4;
 }
 
-static int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp);
-static int mipi_dsi_cmd_dma_rx(struct dsi_buf *rp, int rlen);
-
+extern int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp);
+extern int mipi_dsi_cmd_dma_rx(struct dsi_buf *rp, int rlen);
+//B: Luke MIPI display hang
+/*
+0: for init value
+1: for checking value
+2. for fail
+3. for success
+*/
+int wait_mipi_dma = 0;//init value
+void force_dsi_dma_comp(void)
+{
+    //complete(&dsi_dma_comp);//CH MIPI Timeout detect
+}
+EXPORT_SYMBOL(force_dsi_dma_comp);
+EXPORT_SYMBOL(wait_mipi_dma);
+//E: Luke MIPI display hang
 /*
  * mipi_dsi_cmds_tx:
  * thread context only
  */
-static int mipi_dsi_cmds_tx(struct dsi_buf *tp,
+int mipi_dsi_cmds_tx(struct dsi_buf *tp,
 			struct dsi_cmd_desc *cmds, int cnt)
 {
 	struct dsi_cmd_desc *cm;
@@ -1301,7 +1315,7 @@ static int mipi_dsi_cmds_rx(struct dsi_buf *tp, struct dsi_buf *rp,
 	return rp->len;
 }
 
-static int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
+extern int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
 {
 
 	unsigned long flags;
@@ -1348,7 +1362,7 @@ static int mipi_dsi_cmd_dma_tx(struct dsi_buf *tp)
 	return tp->len;
 }
 
-static int mipi_dsi_cmd_dma_rx(struct dsi_buf *rp, int rlen)
+extern int mipi_dsi_cmd_dma_rx(struct dsi_buf *rp, int rlen)
 {
 	uint32 *lp, data;
 	int i, off, cnt;

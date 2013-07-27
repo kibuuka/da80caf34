@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -15,9 +15,51 @@
 
 #include <mach/iommu.h>
 
-#define KGSL_IOMMU_CTX_OFFSET_V1	0
-#define KGSL_IOMMU_CTX_OFFSET_V2	0x8000
+#define KGSL_IOMMU_CTX_OFFSET_V0	0
+#define KGSL_IOMMU_CTX_OFFSET_V1	0x8000
 #define KGSL_IOMMU_CTX_SHIFT		12
+
+/* TLBLKCR fields */
+#define KGSL_IOMMU_TLBLKCR_LKE_MASK		0x00000001
+#define KGSL_IOMMU_TLBLKCR_LKE_SHIFT		0
+#define KGSL_IOMMU_TLBLKCR_TLBIALLCFG_MASK	0x00000001
+#define KGSL_IOMMU_TLBLKCR_TLBIALLCFG_SHIFT	1
+#define KGSL_IOMMU_TLBLKCR_TLBIASIDCFG_MASK	0x00000001
+#define KGSL_IOMMU_TLBLKCR_TLBIASIDCFG_SHIFT	2
+#define KGSL_IOMMU_TLBLKCR_TLBIVAACFG_MASK	0x00000001
+#define KGSL_IOMMU_TLBLKCR_TLBIVAACFG_SHIFT	3
+#define KGSL_IOMMU_TLBLKCR_FLOOR_MASK		0x000000FF
+#define KGSL_IOMMU_TLBLKCR_FLOOR_SHIFT		8
+#define KGSL_IOMMU_TLBLKCR_VICTIM_MASK		0x000000FF
+#define KGSL_IOMMU_TLBLKCR_VICTIM_SHIFT		16
+
+/* V2PXX fields */
+#define KGSL_IOMMU_V2PXX_INDEX_MASK		0x000000FF
+#define KGSL_IOMMU_V2PXX_INDEX_SHIFT		0
+#define KGSL_IOMMU_V2PXX_VA_MASK		0x000FFFFF
+#define KGSL_IOMMU_V2PXX_VA_SHIFT		12
+
+/* FSYNR1 V0 fields */
+#define KGSL_IOMMU_FSYNR1_AWRITE_MASK		0x00000001
+#define KGSL_IOMMU_FSYNR1_AWRITE_SHIFT		8
+/* FSYNR0 V1 fields */
+#define KGSL_IOMMU_V1_FSYNR0_WNR_MASK		0x00000001
+#define KGSL_IOMMU_V1_FSYNR0_WNR_SHIFT		4
+
+/* TTBR0 register fields */
+#ifdef CONFIG_ARM_LPAE
+#define KGSL_IOMMU_CTX_TTBR0_ADDR_MASK_LPAE	0x000000FFFFFFFFE0ULL
+#define KGSL_IOMMU_CTX_TTBR0_ADDR_MASK KGSL_IOMMU_CTX_TTBR0_ADDR_MASK_LPAE
+#else
+#define KGSL_IOMMU_CTX_TTBR0_ADDR_MASK		0xFFFFC000
+#endif
+
+/* TLBSTATUS register fields */
+#define KGSL_IOMMU_CTX_TLBSTATUS_SACTIVE BIT(0)
+
+/* IMPLDEF_MICRO_MMU_CTRL register fields */
+#define KGSL_IOMMU_IMPLDEF_MICRO_MMU_CTRL_HALT BIT(2)
+#define KGSL_IOMMU_IMPLDEF_MICRO_MMU_CTRL_IDLE BIT(3)
 
 enum kgsl_iommu_reg_map {
 	KGSL_IOMMU_GLOBAL_BASE = 0,
@@ -26,14 +68,34 @@ enum kgsl_iommu_reg_map {
 	KGSL_IOMMU_CTX_FSR,
 	KGSL_IOMMU_CTX_TLBIALL,
 	KGSL_IOMMU_CTX_RESUME,
+	KGSL_IOMMU_CTX_TLBLKCR,
+	KGSL_IOMMU_CTX_V2PUR,
+	KGSL_IOMMU_CTX_FSYNR0,
+	KGSL_IOMMU_CTX_FSYNR1,
+	KGSL_IOMMU_CTX_TLBSYNC,
+	KGSL_IOMMU_CTX_TLBSTATUS,
+	KGSL_IOMMU_IMPLDEF_MICRO_MMU_CTRL,
 	KGSL_IOMMU_REG_MAX
 };
 
 struct kgsl_iommu_register_list {
 	unsigned int reg_offset;
-	unsigned int reg_mask;
-	unsigned int reg_shift;
+	int ctx_reg;
 };
+
+#ifdef CONFIG_MSM_IOMMU
+extern struct iommu_access_ops iommu_access_ops_v0;
+
+static inline struct iommu_access_ops *get_iommu_access_ops_v0(void)
+{
+	return &iommu_access_ops_v0;
+}
+#else
+static inline struct iommu_access_ops *get_iommu_access_ops_v0(void)
+{
+	return NULL;
+}
+#endif
 
 /*
  * Max number of iommu units that the gpu core can have
@@ -45,6 +107,20 @@ struct kgsl_iommu_register_list {
 #define KGSL_IOMMU_MAX_DEVS_PER_UNIT 2
 
 /* Macros to read/write IOMMU registers */
+#define KGSL_IOMMU_SET_CTX_REG_LL(iommu, iommu_unit, ctx, REG, val)	\
+		writell_relaxed(val,					\
+		iommu_unit->reg_map.hostptr +				\
+		iommu->iommu_reg_list[KGSL_IOMMU_CTX_##REG].reg_offset +\
+		(ctx << KGSL_IOMMU_CTX_SHIFT) +				\
+		iommu->ctx_offset)
+
+#define KGSL_IOMMU_GET_CTX_REG_LL(iommu, iommu_unit, ctx, REG)		\
+		readl_relaxed(						\
+		iommu_unit->reg_map.hostptr +				\
+		iommu->iommu_reg_list[KGSL_IOMMU_CTX_##REG].reg_offset +\
+		(ctx << KGSL_IOMMU_CTX_SHIFT) +				\
+		iommu->ctx_offset)
+
 #define KGSL_IOMMU_SET_CTX_REG(iommu, iommu_unit, ctx, REG, val)	\
 		writel_relaxed(val,					\
 		iommu_unit->reg_map.hostptr +				\
@@ -60,10 +136,8 @@ struct kgsl_iommu_register_list {
 		iommu->ctx_offset)
 
 /* Gets the lsb value of pagetable */
-#define KGSL_IOMMMU_PT_LSB(iommu, pt_val) \
-	(pt_val &							\
-	~(iommu->iommu_reg_list[KGSL_IOMMU_CTX_TTBR0].reg_mask <<	\
-	iommu->iommu_reg_list[KGSL_IOMMU_CTX_TTBR0].reg_shift))
+#define KGSL_IOMMMU_PT_LSB(iommu, pt_val)				\
+	(pt_val & ~(KGSL_IOMMU_CTX_TTBR0_ADDR_MASK))
 
 /* offset at which a nop command is placed in setstate_memory */
 #define KGSL_IOMMU_SETSTATE_NOP_OFFSET	1024
@@ -73,8 +147,7 @@ struct kgsl_iommu_register_list {
  * @dev: Device pointer to iommu context
  * @attached: Indicates whether this iommu context is presently attached to
  * a pagetable/domain or not
- * @pt_lsb: The LSB of IOMMU_TTBR0 register which is the pagetable
- * register
+ * @default_ttbr0: The TTBR0 value set by iommu driver on start up
  * @ctx_id: This iommu units context id. It can be either 0 or 1
  * @clk_enabled: If set indicates that iommu clocks of this iommu context
  * are on, else the clocks are off
@@ -84,7 +157,7 @@ struct kgsl_iommu_register_list {
 struct kgsl_iommu_device {
 	struct device *dev;
 	bool attached;
-	unsigned int pt_lsb;
+	phys_addr_t default_ttbr0;
 	enum kgsl_iommu_context_id ctx_id;
 	bool clk_enabled;
 	struct kgsl_device *kgsldev;
@@ -99,11 +172,18 @@ struct kgsl_iommu_device {
  * @dev_count: Number of IOMMU contexts that are valid in the previous feild
  * @reg_map: Memory descriptor which holds the mapped address of this IOMMU
  * units register range
+ * @ahb_base - The base address from where IOMMU registers can be accesed from
+ * ahb bus
+ * @iommu_halt_enable: Valid only on IOMMU-v1, when set indicates that the iommu
+ * unit supports halting of the IOMMU, which can be enabled while programming
+ * the IOMMU registers for synchronization
  */
 struct kgsl_iommu_unit {
 	struct kgsl_iommu_device dev[KGSL_IOMMU_MAX_DEVS_PER_UNIT];
 	unsigned int dev_count;
 	struct kgsl_memdesc reg_map;
+	unsigned int ahb_base;
+	int iommu_halt_enable;
 };
 
 /*

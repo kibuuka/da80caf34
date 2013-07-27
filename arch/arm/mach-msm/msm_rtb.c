@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -55,7 +55,7 @@ struct msm_rtb_layout {
 
 struct msm_rtb_state {
 	struct msm_rtb_layout *rtb;
-	unsigned long phys;
+	phys_addr_t phys;
 	int nentries;
 	int size;
 	int enabled;

@@ -47,9 +47,11 @@
 #define IPA_IOCTL_V4_INIT_NAT    23
 #define IPA_IOCTL_NAT_DMA        24
 #define IPA_IOCTL_V4_DEL_NAT     26
-#define IPA_IOCTL_GET_ASYNC_MSG  27
+#define IPA_IOCTL_PULL_MSG       27
 #define IPA_IOCTL_GET_NAT_OFFSET 28
-#define IPA_IOCTL_MAX            29
+#define IPA_IOCTL_RM_ADD_DEPENDENCY 29
+#define IPA_IOCTL_RM_DEL_DEPENDENCY 30
+#define IPA_IOCTL_MAX            31
 
 /**
  * max size of the header to be inserted
@@ -60,6 +62,11 @@
  * max size of the name of the resource (routing table, header)
  */
 #define IPA_RESOURCE_NAME_MAX 20
+
+/**
+ * size of the mac address
+ */
+#define IPA_MAC_ADDR_SIZE  6
 
 /**
  * the attributes of the rule (routing or filtering)
@@ -139,6 +146,64 @@ enum ipa_flt_action {
 	IPA_PASS_TO_SRC_NAT,
 	IPA_PASS_TO_DST_NAT,
 	IPA_PASS_TO_EXCEPTION
+};
+
+/**
+ * enum ipa_wlan_event - Events for wlan client
+ *
+ * wlan client connect: New wlan client connected
+ * wlan client disconnect: wlan client disconnected
+ * wlan client power save: wlan client moved to power save
+ * wlan client normal: wlan client moved out of power save
+ * sw routing enable: ipa routing is disabled
+ * sw routing disable: ipa routing is enabled
+ * wlan ap connect: wlan AP(access point) is up
+ * wlan ap disconnect: wlan AP(access point) is down
+ * wlan sta connect: wlan STA(station) is up
+ * wlan sta disconnect: wlan STA(station) is down
+ */
+enum ipa_wlan_event {
+	WLAN_CLIENT_CONNECT,
+	WLAN_CLIENT_DISCONNECT,
+	WLAN_CLIENT_POWER_SAVE_MODE,
+	WLAN_CLIENT_NORMAL_MODE,
+	SW_ROUTING_ENABLE,
+	SW_ROUTING_DISABLE,
+	WLAN_AP_CONNECT,
+	WLAN_AP_DISCONNECT,
+	WLAN_STA_CONNECT,
+	WLAN_STA_DISCONNECT,
+	IPA_EVENT_MAX
+};
+
+/**
+ * enum ipa_rm_resource_name - IPA RM clients identification names
+ *
+ * Add new mapping to ipa_rm_dep_prod_index() / ipa_rm_dep_cons_index()
+ * when adding new entry to this enum.
+ */
+enum ipa_rm_resource_name {
+	IPA_RM_RESOURCE_PROD = 0,
+	IPA_RM_RESOURCE_BRIDGE_PROD = IPA_RM_RESOURCE_PROD,
+	IPA_RM_RESOURCE_A2_PROD,
+	IPA_RM_RESOURCE_USB_PROD,
+	IPA_RM_RESOURCE_HSIC_PROD,
+	IPA_RM_RESOURCE_STD_ECM_PROD,
+	IPA_RM_RESOURCE_WWAN_0_PROD,
+	IPA_RM_RESOURCE_WWAN_1_PROD,
+	IPA_RM_RESOURCE_WWAN_2_PROD,
+	IPA_RM_RESOURCE_WWAN_3_PROD,
+	IPA_RM_RESOURCE_WWAN_4_PROD,
+	IPA_RM_RESOURCE_WWAN_5_PROD,
+	IPA_RM_RESOURCE_WWAN_6_PROD,
+	IPA_RM_RESOURCE_WWAN_7_PROD,
+	IPA_RM_RESOURCE_WLAN_PROD,
+	IPA_RM_RESOURCE_PROD_MAX,
+
+	IPA_RM_RESOURCE_A2_CONS = IPA_RM_RESOURCE_PROD_MAX,
+	IPA_RM_RESOURCE_USB_CONS,
+	IPA_RM_RESOURCE_HSIC_CONS,
+	IPA_RM_RESOURCE_MAX
 };
 
 /**
@@ -501,10 +566,12 @@ struct ipa_ioc_tx_intf_prop {
 /**
  * struct ipa_ioc_query_intf_tx_props - interface tx propertie
  * @name: name of interface
+ * @num_tx_props: number of TX properties
  * @tx[0]: output parameter, the tx properties go here back to back
  */
 struct ipa_ioc_query_intf_tx_props {
 	char name[IPA_RESOURCE_NAME_MAX];
+	uint32_t num_tx_props;
 	struct ipa_ioc_tx_intf_prop tx[0];
 };
 
@@ -523,10 +590,12 @@ struct ipa_ioc_rx_intf_prop {
 /**
  * struct ipa_ioc_query_intf_rx_props - interface rx propertie
  * @name: name of interface
+ * @num_rx_props: number of RX properties
  * @rx: output parameter, the rx properties go here back to back
  */
 struct ipa_ioc_query_intf_rx_props {
 	char name[IPA_RESOURCE_NAME_MAX];
+	uint32_t num_rx_props;
 	struct ipa_ioc_rx_intf_prop rx[0];
 };
 
@@ -609,22 +678,52 @@ struct ipa_ioc_nat_dma_cmd {
 /**
  * struct ipa_msg_meta - Format of the message meta-data.
  * @msg_type: the type of the message
- * @msg_len: the length of the message in bytes
  * @rsvd: reserved bits for future use.
+ * @msg_len: the length of the message in bytes
  *
+ * For push model:
  * Client in user-space should issue a read on the device (/dev/ipa) with a
- * buffer of atleast this size in an continuous loop, call will block when there
- * is no pending async message.
+ * sufficiently large buffer in a continuous loop, call will block when there is
+ * no message to read. Upon return, client can read the ipa_msg_meta from start
+ * of buffer to find out type and length of message
+ * size of buffer supplied >= (size of largest message + size of metadata)
  *
- * After reading a message's meta-data using above scheme, client should issue a
- * GET_MSG IOCTL to actually read the message itself into the buffer of
- * "msg_len" immediately following the ipa_msg_meta itself in the IOCTL payload
+ * For pull model:
+ * Client in user-space can also issue a pull msg IOCTL to device (/dev/ipa)
+ * with a payload containing space for the ipa_msg_meta and the message specific
+ * payload length.
+ * size of buffer supplied == (len of specific message  + size of metadata)
  */
 struct ipa_msg_meta {
 	uint8_t msg_type;
-	uint16_t msg_len;
 	uint8_t rsvd;
+	uint16_t msg_len;
 };
+
+/**
+ * struct ipa_wlan_msg - To hold information about wlan client
+ * @name: name of the wlan interface
+ * @mac_addr: mac address of wlan client
+ *
+ * wlan drivers need to pass name of wlan iface and mac address of
+ * wlan client along with ipa_wlan_event, whenever a wlan client is
+ * connected/disconnected/moved to power save/come out of power save
+ */
+struct ipa_wlan_msg {
+	char name[IPA_RESOURCE_NAME_MAX];
+	uint8_t mac_addr[IPA_MAC_ADDR_SIZE];
+};
+
+/**
+ * struct ipa_ioc_rm_dependency - parameters for add/delete dependency
+ * @resource_name: name of dependent resource
+ * @depends_on_name: name of its dependency
+ */
+struct ipa_ioc_rm_dependency {
+	enum ipa_rm_resource_name resource_name;
+	enum ipa_rm_resource_name depends_on_name;
+};
+
 
 /**
  *   actual IOCTLs supported by IPA driver
@@ -707,8 +806,97 @@ struct ipa_msg_meta {
 #define IPA_IOC_SET_FLT _IOW(IPA_IOC_MAGIC, \
 			IPA_IOCTL_SET_FLT, \
 			uint32_t)
-#define IPA_IOC_GET_ASYNC_MSG _IOWR(IPA_IOC_MAGIC, \
-				IPA_IOCTL_GET_ASYNC_MSG, \
+#define IPA_IOC_PULL_MSG _IOWR(IPA_IOC_MAGIC, \
+				IPA_IOCTL_PULL_MSG, \
 				struct ipa_msg_meta *)
+#define IPA_IOC_RM_ADD_DEPENDENCY _IOWR(IPA_IOC_MAGIC, \
+				IPA_IOCTL_RM_ADD_DEPENDENCY, \
+				struct ipa_ioc_rm_dependency *)
+#define IPA_IOC_RM_DEL_DEPENDENCY _IOWR(IPA_IOC_MAGIC, \
+				IPA_IOCTL_RM_DEL_DEPENDENCY, \
+				struct ipa_ioc_rm_dependency *)
+
+/*
+ * unique magic number of the Tethering bridge ioctls
+ */
+#define TETH_BRIDGE_IOC_MAGIC 0xCE
+
+/*
+ * Ioctls supported by Tethering bridge driver
+ */
+#define TETH_BRIDGE_IOCTL_SET_BRIDGE_MODE	0
+#define TETH_BRIDGE_IOCTL_SET_AGGR_PARAMS	1
+#define TETH_BRIDGE_IOCTL_GET_AGGR_PARAMS	2
+#define TETH_BRIDGE_IOCTL_GET_AGGR_CAPABILITIES	3
+#define TETH_BRIDGE_IOCTL_MAX			4
+
+
+/**
+ * enum teth_link_protocol_type - link protocol (IP / Ethernet)
+ */
+enum teth_link_protocol_type {
+	TETH_LINK_PROTOCOL_IP,
+	TETH_LINK_PROTOCOL_ETHERNET,
+	TETH_LINK_PROTOCOL_MAX,
+};
+
+/**
+ * enum teth_aggr_protocol_type - Aggregation protocol (MBIM / TLP)
+ */
+enum teth_aggr_protocol_type {
+	TETH_AGGR_PROTOCOL_NONE,
+	TETH_AGGR_PROTOCOL_MBIM,
+	TETH_AGGR_PROTOCOL_TLP,
+	TETH_AGGR_PROTOCOL_MAX,
+};
+
+/**
+ * struct teth_aggr_params_link - Aggregation parameters for uplink/downlink
+ * @aggr_prot:			Aggregation protocol (MBIM / TLP)
+ * @max_transfer_size_byte:	Maximal size of aggregated packet in bytes.
+ *				Default value is 16*1024.
+ * @max_datagrams:		Maximal number of IP packets in an aggregated
+ *				packet. Default value is 16
+ */
+struct teth_aggr_params_link {
+	enum teth_aggr_protocol_type aggr_prot;
+	uint32_t max_transfer_size_byte;
+	uint32_t max_datagrams;
+};
+
+
+/**
+ * struct teth_aggr_params - Aggregation parmeters
+ * @ul:	Uplink parameters
+ * @dl: Downlink parmaeters
+ */
+struct teth_aggr_params {
+	struct teth_aggr_params_link ul;
+	struct teth_aggr_params_link dl;
+};
+
+/**
+ * struct teth_aggr_capabilities - Aggregation capabilities
+ * @num_protocols:		Number of protocols described in the array
+ * @prot_caps[]:		Array of aggregation capabilities per protocol
+ */
+struct teth_aggr_capabilities {
+	uint16_t num_protocols;
+	struct teth_aggr_params_link prot_caps[0];
+};
+
+
+#define TETH_BRIDGE_IOC_SET_BRIDGE_MODE _IOW(TETH_BRIDGE_IOC_MAGIC, \
+				TETH_BRIDGE_IOCTL_SET_BRIDGE_MODE, \
+				enum teth_link_protocol_type)
+#define TETH_BRIDGE_IOC_SET_AGGR_PARAMS _IOW(TETH_BRIDGE_IOC_MAGIC, \
+				TETH_BRIDGE_IOCTL_SET_AGGR_PARAMS, \
+				struct teth_aggr_params *)
+#define TETH_BRIDGE_IOC_GET_AGGR_PARAMS _IOR(TETH_BRIDGE_IOC_MAGIC, \
+				TETH_BRIDGE_IOCTL_GET_AGGR_PARAMS, \
+				struct teth_aggr_params *)
+#define TETH_BRIDGE_IOC_GET_AGGR_CAPABILITIES _IOWR(TETH_BRIDGE_IOC_MAGIC, \
+				TETH_BRIDGE_IOCTL_GET_AGGR_CAPABILITIES, \
+				struct teth_aggr_capabilities *)
 
 #endif /* _MSM_IPA_H_ */

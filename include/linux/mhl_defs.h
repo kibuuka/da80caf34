@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -57,7 +57,7 @@ enum DevCapOffset_e {
 /* bits 4..7 */
 #define	MHL_VER_MAJOR           (0x01 << 4)
 /* bits 0..3 */
-#define	MHL_VER_MINOR		0x01
+#define	MHL_VER_MINOR		0x02
 #define MHL_VERSION		(MHL_VER_MAJOR | MHL_VER_MINOR)
 
 /*Device Category*/
@@ -128,10 +128,14 @@ enum DevCapOffset_e {
 
 /* This contains one nibble each - max offset */
 #define		MHL_INT_AND_STATUS_SIZE			0x33
+#define         MHL_SCRATCHPAD_OFFSET                   0x40
 #define		MHL_SCRATCHPAD_SIZE			16
+#define		MAX_SCRATCHPAD_TRANSFER_SIZE		64
+#define		ADOPTER_ID_SIZE				2
+
 /* manually define highest number */
 #define		MHL_MAX_BUFFER_SIZE			MHL_SCRATCHPAD_SIZE
-
+#define		MHL_BURST_WAIT		(1000)
 
 
 enum {
@@ -149,12 +153,15 @@ enum {
 
 #define MHL_RCPE_NO_ERROR			0x00
 #define MHL_RCPE_UNSUPPORTED_KEY_CODE		0x01
+#define MHL_RCPE_INEFFECTIVE_KEY_CODE		0x01
 #define MHL_RCPE_BUSY				0x02
 
 #define MHL_RAPK_NO_ERROR			0x00
 #define MHL_RAPK_UNRECOGNIZED_ACTION_CODE	0x01
 #define MHL_RAPK_UNSUPPORTED_ACTION_CODE	0x02
 #define MHL_RAPK_BUSY				0x03
+
+#define T_ABORT_NEXT                    (2050)
 
 /* MHL spec related defines*/
 enum {
@@ -196,6 +203,8 @@ enum {
 	MHL_GET_SC3_ERRORCODE		= 0x6D,
 };
 
+/* Polling. */
+#define MHL_RAP_POLL                    0x00
 /* Turn content streaming ON. */
 #define	MHL_RAP_CONTENT_ON		0x10
 /* Turn content streaming OFF. */

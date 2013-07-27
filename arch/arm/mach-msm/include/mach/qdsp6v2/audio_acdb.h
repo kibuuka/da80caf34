@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,13 +14,8 @@
 #define _AUDIO_ACDB_H
 
 #include <linux/msm_audio_acdb.h>
-#if defined(CONFIG_ARCH_MSM8974) || defined(CONFIG_ARCH_MSM9625) \
-	|| defined(CONFIG_ARCH_MSM8226)
-
-#include <sound/q6adm-v2.h>
-#else
 #include <sound/q6adm.h>
-#endif
+
 enum {
 	RX_CAL,
 	TX_CAL,
@@ -62,14 +57,11 @@ void get_all_cvp_cal(struct acdb_cal_block *cal_block);
 void get_all_vocproc_cal(struct acdb_cal_block *cal_block);
 void get_all_vocstrm_cal(struct acdb_cal_block *cal_block);
 void get_all_vocvol_cal(struct acdb_cal_block *cal_block);
-void get_voice_col_data(uint32_t vocproc_type,
-	struct acdb_cal_block *cal_block);
 void get_anc_cal(struct acdb_cal_block *cal_block);
 void get_afe_cal(int32_t path, struct acdb_cal_block *cal_block);
 void get_audproc_cal(int32_t path, struct acdb_cal_block *cal_block);
 void get_audstrm_cal(int32_t path, struct acdb_cal_block *cal_block);
 void get_audvol_cal(int32_t path, struct acdb_cal_block *cal_block);
-void get_vocproc_dev_cfg_cal(struct acdb_cal_block *cal_block);
 void get_vocproc_cal(struct acdb_cal_data *cal_data);
 void get_vocstrm_cal(struct acdb_cal_data *cal_data);
 void get_vocvol_cal(struct acdb_cal_data *cal_data);

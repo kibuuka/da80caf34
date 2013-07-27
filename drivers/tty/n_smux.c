@@ -1,6 +1,6 @@
 /* drivers/tty/n_smux.c
  *
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -259,6 +259,8 @@ struct smux_ldisc_t {
 	unsigned powerdown_enabled;
 	unsigned power_ctl_remote_req_received;
 	struct list_head power_queue;
+	unsigned remote_initiated_wakeup_count;
+	unsigned local_initiated_wakeup_count;
 };
 
 
@@ -279,6 +281,7 @@ static const char * const smux_cmds[] = {
 	[SMUX_CMD_CLOSE_LCH] = "CLOSE",
 	[SMUX_CMD_STATUS] = "STATUS",
 	[SMUX_CMD_PWR_CTL] = "PWR",
+	[SMUX_CMD_DELAY] = "DELAY",
 	[SMUX_CMD_BYTE] = "Raw Byte",
 };
 
@@ -1287,8 +1290,9 @@ static int smux_handle_rx_open_cmd(struct smux_pkt_t *pkt)
 			goto out;
 		}
 		ack_pkt->hdr.cmd = SMUX_CMD_OPEN_LCH;
-		ack_pkt->hdr.flags = SMUX_CMD_OPEN_ACK
-			| SMUX_CMD_OPEN_POWER_COLLAPSE;
+		ack_pkt->hdr.flags = SMUX_CMD_OPEN_ACK;
+		if (enable_powerdown)
+			ack_pkt->hdr.flags |= SMUX_CMD_OPEN_POWER_COLLAPSE;
 		ack_pkt->hdr.lcid = lcid;
 		ack_pkt->hdr.payload_len = 0;
 		ack_pkt->hdr.pad_len = 0;
@@ -1308,8 +1312,9 @@ static int smux_handle_rx_open_cmd(struct smux_pkt_t *pkt)
 			if (ack_pkt) {
 				ack_pkt->hdr.lcid = lcid;
 				ack_pkt->hdr.cmd = SMUX_CMD_OPEN_LCH;
-				ack_pkt->hdr.flags =
-					SMUX_CMD_OPEN_POWER_COLLAPSE;
+				if (enable_powerdown)
+					ack_pkt->hdr.flags |=
+						SMUX_CMD_OPEN_POWER_COLLAPSE;
 				ack_pkt->hdr.payload_len = 0;
 				ack_pkt->hdr.pad_len = 0;
 				smux_tx_queue(ack_pkt, ch, 0);
@@ -1717,7 +1722,7 @@ static int smux_handle_rx_status_cmd(struct smux_pkt_t *pkt)
  */
 static int smux_handle_rx_power_cmd(struct smux_pkt_t *pkt)
 {
-	struct smux_pkt_t *ack_pkt = NULL;
+	struct smux_pkt_t *ack_pkt;
 	int power_down = 0;
 	unsigned long flags;
 
@@ -1906,6 +1911,7 @@ static void smux_handle_wakeup_req(void)
 		/* wakeup system */
 		SMUX_PWR("smux: %s: Power %d->%d\n", __func__,
 				smux.power_state, SMUX_PWR_ON);
+		smux.remote_initiated_wakeup_count++;
 		smux.power_state = SMUX_PWR_ON;
 		queue_work(smux_tx_wq, &smux_wakeup_work);
 		queue_work(smux_tx_wq, &smux_tx_work);
@@ -2158,6 +2164,62 @@ bool smux_remote_is_active(void)
 	mutex_unlock(&smux.mutex_lha0);
 
 	return is_active;
+}
+
+/**
+ * Sends a delay command to the remote side.
+ *
+ * @ms: Time in milliseconds for the remote side to delay
+ *
+ * This command defines the delay that the remote side will use
+ * to slow the response time for DATA commands.
+ */
+void smux_set_loopback_data_reply_delay(uint32_t ms)
+{
+	struct smux_lch_t *ch = &smux_lch[SMUX_TEST_LCID];
+	struct smux_pkt_t *pkt;
+
+	pkt = smux_alloc_pkt();
+	if (!pkt) {
+		pr_err("%s: unable to allocate packet\n", __func__);
+		return;
+	}
+
+	pkt->hdr.lcid = ch->lcid;
+	pkt->hdr.cmd = SMUX_CMD_DELAY;
+	pkt->hdr.flags = 0;
+	pkt->hdr.payload_len = sizeof(uint32_t);
+	pkt->hdr.pad_len = 0;
+
+	if (smux_alloc_pkt_payload(pkt)) {
+		pr_err("%s: unable to allocate payload\n", __func__);
+		smux_free_pkt(pkt);
+		return;
+	}
+	memcpy(pkt->payload, &ms, sizeof(uint32_t));
+
+	smux_tx_queue(pkt, ch, 1);
+}
+
+/**
+ * Retrieve wakeup counts.
+ *
+ * @local_cnt: Pointer to local wakeup count
+ * @remote_cnt: Pointer to remote wakeup count
+ */
+void smux_get_wakeup_counts(int *local_cnt, int *remote_cnt)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&smux.tx_lock_lha2, flags);
+
+	if (local_cnt)
+		*local_cnt = smux.local_initiated_wakeup_count;
+
+	if (remote_cnt)
+		*remote_cnt = smux.remote_initiated_wakeup_count;
+
+	spin_unlock_irqrestore(&smux.tx_lock_lha2, flags);
 }
 
 /**
@@ -2742,6 +2804,7 @@ static void smux_tx_worker(struct work_struct *work)
 				SMUX_PWR("smux: %s: Power %d->%d\n", __func__,
 						smux.power_state,
 						SMUX_PWR_TURNING_ON);
+				smux.local_initiated_wakeup_count++;
 				smux.power_state = SMUX_PWR_TURNING_ON;
 				spin_unlock_irqrestore(&smux.tx_lock_lha2,
 						flags);

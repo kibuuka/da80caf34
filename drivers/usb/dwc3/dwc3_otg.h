@@ -1,7 +1,7 @@
 /**
  * dwc3_otg.h - DesignWare USB3 DRD Controller OTG
  *
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,6 +20,7 @@
 #include <linux/power_supply.h>
 
 #include <linux/usb/otg.h>
+#include "power.h"
 
 #define DWC3_IDEV_CHG_MAX 1500
 
@@ -48,6 +49,7 @@ struct dwc3_otg {
 	unsigned long inputs;
 	struct power_supply	*psy;
 	struct completion	dwc3_xcvr_vbus_init;
+	int			host_bus_suspend;
 };
 
 /**
@@ -59,18 +61,23 @@ struct dwc3_otg {
  * DWC3_DCP_CHARGER	Dedicated charger port (AC charger/ Wall charger).
  * DWC3_CDP_CHARGER	Charging downstream port. Enumeration can happen and
  *                      IDEV_CHG_MAX can be drawn irrespective of USB state.
+ * DWC3_PROPRIETARY_CHARGER A proprietary charger pull DP and DM to specific
+ *                     voltages between 2.0-3.3v for identification.
  */
 enum dwc3_chg_type {
 	DWC3_INVALID_CHARGER = 0,
 	DWC3_SDP_CHARGER,
 	DWC3_DCP_CHARGER,
 	DWC3_CDP_CHARGER,
+	DWC3_PROPRIETARY_CHARGER,
 };
 
 struct dwc3_charger {
 	enum dwc3_chg_type	chg_type;
 	unsigned		max_power;
 	bool			charging_disabled;
+
+	bool			skip_chg_detect;
 
 	/* start/stop charger detection, provided by external charger module */
 	void	(*start_detection)(struct dwc3_charger *charger, bool start);
@@ -104,7 +111,7 @@ struct dwc3_ext_xceiv {
 	void	(*notify_ext_events)(struct usb_otg *otg,
 					enum dwc3_ext_events ext_event);
 	/* for block reset USB core */
-	void	(*ext_block_reset)(void);
+	void	(*ext_block_reset)(bool core_reset);
 };
 
 /* for external transceiver driver */

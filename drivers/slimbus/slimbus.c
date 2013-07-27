@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -232,6 +232,17 @@ int slim_driver_register(struct slim_driver *drv)
 	return driver_register(&drv->driver);
 }
 EXPORT_SYMBOL_GPL(slim_driver_register);
+
+/*
+ * slim_driver_unregister: Undo effects of slim_driver_register
+ * @drv: Client driver to be unregistered
+ */
+void slim_driver_unregister(struct slim_driver *drv)
+{
+	if (drv)
+		driver_unregister(&drv->driver);
+}
+EXPORT_SYMBOL_GPL(slim_driver_unregister);
 
 #define slim_ctrl_attr_gr NULL
 
@@ -2557,11 +2568,12 @@ static void slim_chan_changes(struct slim_device *sb, bool revert)
 					struct slim_pending_ch, pending);
 		struct slim_ich *slc = &ctrl->chans[pch->chan];
 		u32 sl = slc->seglen << slc->rootexp;
-		if (revert) {
+		if (revert || slc->def > 0) {
 			if (slc->coeff == SLIM_COEFF_3)
 				sl *= 3;
 			ctrl->sched.usedslots += sl;
-			slc->def = 1;
+			if (revert)
+				slc->def++;
 			slc->state = SLIM_CH_ACTIVE;
 		} else
 			slim_remove_ch(ctrl, slc);
@@ -2624,7 +2636,11 @@ int slim_reconfigure_now(struct slim_device *sb)
 			/* Disconnect source port to free it up */
 			if (SLIM_HDL_TO_LA(slc->srch) == sb->laddr)
 				slc->srch = 0;
-			if (slc->def != 0) {
+			/*
+			 * If controller overrides BW allocation,
+			 * delete this in remove channel itself
+			 */
+			if (slc->def != 0 && !ctrl->allocbw) {
 				list_del(&pch->pending);
 				kfree(pch);
 			}
@@ -3047,6 +3063,7 @@ int slim_ctrl_clk_pause(struct slim_controller *ctrl, bool wakeup, u8 restart)
 	for (i = 0; i < ctrl->last_tid; i++) {
 		if (ctrl->txnt[i]) {
 			ret = -EBUSY;
+			pr_info("slim_clk_pause: txn-rsp for %d pending", i);
 			mutex_unlock(&ctrl->m_ctrl);
 			return -EBUSY;
 		}
@@ -3057,6 +3074,7 @@ int slim_ctrl_clk_pause(struct slim_controller *ctrl, bool wakeup, u8 restart)
 	mutex_lock(&ctrl->sched.m_reconf);
 	/* Data channels active */
 	if (ctrl->sched.usedslots) {
+		pr_info("slim_clk_pause: data channel active");
 		ret = -EBUSY;
 		goto clk_pause_ret;
 	}

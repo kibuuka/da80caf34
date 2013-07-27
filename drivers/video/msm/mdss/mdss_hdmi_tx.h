@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,13 +25,15 @@ enum hdmi_tx_io_type {
 
 enum hdmi_tx_power_module_type {
 	HDMI_TX_HPD_PM,
+	HDMI_TX_DDC_PM,
 	HDMI_TX_CORE_PM,
 	HDMI_TX_CEC_PM,
 	HDMI_TX_MAX_PM
 };
 
+/* Data filled from device tree */
 struct hdmi_tx_platform_data {
-	/* Data filled from device tree nodes */
+	bool primary;
 	struct dss_io_data io[HDMI_TX_MAX_IO];
 	struct dss_module_power power_data[HDMI_TX_MAX_PM];
 };
@@ -58,6 +60,9 @@ struct hdmi_tx_ctrl {
 	u32 hpd_off_pending;
 	u32 hpd_feature_on;
 	u32 hpd_initialized;
+	u8  timing_gen_on;
+	u32 mhl_max_pclk;
+	u8  mhl_hpd_on;
 	struct completion hpd_done;
 	struct work_struct hpd_int_work;
 

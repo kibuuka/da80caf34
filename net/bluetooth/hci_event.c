@@ -1,6 +1,6 @@
 /*
    BlueZ - Bluetooth protocol stack for Linux
-   Copyright (c) 2000-2001, 2010-2012 The Linux Foundation. All rights reserved.
+   Copyright (c) 2000-2001, 2010-2013 The Linux Foundation. All rights reserved.
 
    Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>
 
@@ -2046,7 +2046,7 @@ static inline void hci_remote_features_evt(struct hci_dev *hdev, struct sk_buff 
 							sizeof(cp), &cp);
 		goto unlock;
 	} else  if (!(lmp_ssp_capable(conn)) && conn->auth_initiator &&
-		(conn->pending_sec_level == BT_SECURITY_HIGH)) {
+		(conn->pending_sec_level == BT_SECURITY_VERY_HIGH)) {
 		conn->pending_sec_level = BT_SECURITY_MEDIUM;
 	}
 
@@ -2426,6 +2426,21 @@ static inline void hci_cmd_status_evt(struct hci_dev *hdev, struct sk_buff *skb)
 	}
 }
 
+static inline void hci_hardware_error_evt(struct hci_dev *hdev,
+					struct sk_buff *skb)
+{
+	struct hci_ev_hardware_error *ev = (void *) skb->data;
+
+	BT_ERR("hdev=%p, hw_err_code = %u", hdev, ev->hw_err_code);
+
+	if (hdev && hdev->dev_type == HCI_BREDR) {
+		hci_dev_lock_bh(hdev);
+		mgmt_powered(hdev->id, 1);
+		hci_dev_unlock_bh(hdev);
+	}
+
+}
+
 static inline void hci_role_change_evt(struct hci_dev *hdev, struct sk_buff *skb)
 {
 	struct hci_ev_role_change *ev = (void *) skb->data;
@@ -2596,9 +2611,6 @@ static inline void hci_mode_change_evt(struct hci_dev *hdev, struct sk_buff *skb
 			else
 				conn->power_save = 0;
 		}
-		if (conn->mode == HCI_CM_SNIFF)
-			if (wake_lock_active(&conn->idle_lock))
-				wake_unlock(&conn->idle_lock);
 
 		if (test_and_clear_bit(HCI_CONN_SCO_SETUP_PEND, &conn->pend))
 			hci_sco_setup(conn, ev->status);
@@ -2668,6 +2680,12 @@ static inline void hci_link_key_request_evt(struct hci_dev *hdev, struct sk_buff
 	if (conn) {
 		BT_DBG("Conn pending sec level is %d, ssp is %d, key len is %d",
 			conn->pending_sec_level, conn->ssp_mode, key->pin_len);
+	}
+	if (conn && (conn->ssp_mode == 0) &&
+		(conn->pending_sec_level == BT_SECURITY_VERY_HIGH) &&
+		(key->pin_len != 16)) {
+		BT_DBG("Security is high ignoring this key");
+		goto not_found;
 	}
 
 	if (key->key_type == 0x04 && conn && conn->auth_type != 0xff &&
@@ -2853,14 +2871,14 @@ static inline void hci_remote_ext_features_evt(struct hci_dev *hdev, struct sk_b
 
 		conn->ssp_mode = (ev->features[0] & 0x01);
 		/*In case if remote device ssp supported/2.0 device
-		reduce the security level to MEDIUM if it is HIGH*/
+		reduce the security level to MEDIUM if it is VERY HIGH*/
 		if (!conn->ssp_mode && conn->auth_initiator &&
-			(conn->pending_sec_level == BT_SECURITY_HIGH))
+			(conn->pending_sec_level == BT_SECURITY_VERY_HIGH))
 			conn->pending_sec_level = BT_SECURITY_MEDIUM;
 
 		if (conn->ssp_mode && conn->auth_initiator &&
 			conn->io_capability != 0x03) {
-			conn->pending_sec_level = BT_SECURITY_HIGH;
+			conn->pending_sec_level = BT_SECURITY_VERY_HIGH;
 			conn->auth_type = HCI_AT_DEDICATED_BONDING_MITM;
 		}
 	}
@@ -3550,6 +3568,10 @@ void hci_event_packet(struct hci_dev *hdev, struct sk_buff *skb)
 
 	case HCI_EV_CMD_STATUS:
 		hci_cmd_status_evt(hdev, skb);
+		break;
+
+	case HCI_EV_HARDWARE_ERROR:
+		hci_hardware_error_evt(hdev, skb);
 		break;
 
 	case HCI_EV_ROLE_CHANGE:

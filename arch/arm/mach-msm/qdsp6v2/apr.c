@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,6 +26,7 @@
 #include <linux/sysfs.h>
 #include <linux/device.h>
 #include <linux/slab.h>
+#include <sound/apr_audio-v2.h>
 #include <asm/mach-types.h>
 #include <mach/subsystem_restart.h>
 #include <mach/msm_smd.h>
@@ -55,7 +56,7 @@ struct apr_svc_table {
 	int client_id;
 };
 
-static const struct apr_svc_table svc_tbl_audio[] = {
+static const struct apr_svc_table svc_tbl_qdsp6[] = {
 	{
 		.name = "AFE",
 		.idx = 0,
@@ -108,6 +109,17 @@ static const struct apr_svc_table svc_tbl_audio[] = {
 		.name = "USM",
 		.idx = 8,
 		.id = APR_SVC_USM,
+		.client_id = APR_CLIENT_AUDIO,
+	},
+	{
+		.name = "VIDC",
+		.idx = 9,
+		.id = APR_SVC_VIDC,
+	},
+	{
+		.name = "LSM",
+		.idx = 10,
+		.id = APR_SVC_LSM,
 		.client_id = APR_CLIENT_AUDIO,
 	},
 };
@@ -274,7 +286,6 @@ int apr_send_pkt(void *handle, uint32_t *buf)
 		return -ENETRESET;
 	}
 
-
 	spin_lock_irqsave(&svc->w_lock, flags);
 	dest_id = svc->dest_id;
 	client_id = svc->client_id;
@@ -385,7 +396,10 @@ void apr_cb_func(void *buf, int len, void *priv)
 		    svc == APR_SVC_ADM || svc == APR_SVC_ADSP_CORE ||
 		    svc == APR_SVC_USM ||
 		    svc == APR_SVC_TEST_CLIENT || svc == APR_SVC_ADSP_MVM ||
-		    svc == APR_SVC_ADSP_CVS || svc == APR_SVC_ADSP_CVP)
+		    svc == APR_SVC_ADSP_CVS || svc == APR_SVC_ADSP_CVP ||
+		    svc == APR_SVC_LSM)
+			clnt = APR_CLIENT_AUDIO;
+		else if (svc == APR_SVC_VIDC)
 			clnt = APR_CLIENT_AUDIO;
 		else {
 			pr_err("APR: Wrong svc :%d\n", svc);
@@ -441,8 +455,8 @@ int apr_get_svc(const char *svc_name, int dest_id, int *client_id,
 	int ret = 0;
 
 	if (dest_id == APR_DEST_QDSP6) {
-		tbl = (struct apr_svc_table *)&svc_tbl_audio;
-		size = ARRAY_SIZE(svc_tbl_audio);
+		tbl = (struct apr_svc_table *)&svc_tbl_qdsp6;
+		size = ARRAY_SIZE(svc_tbl_qdsp6);
 	} else {
 		tbl = (struct apr_svc_table *)&svc_tbl_voice;
 		size = ARRAY_SIZE(svc_tbl_voice);

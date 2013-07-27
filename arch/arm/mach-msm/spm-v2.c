@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -358,10 +358,12 @@ static void msm_spm_drv_set_avs_vlevel(struct msm_spm_driver_data *dev,
 int msm_spm_drv_set_vdd(struct msm_spm_driver_data *dev, unsigned int vlevel)
 {
 	uint32_t timeout_us, new_level;
-	bool avs_enabled = msm_spm_drv_is_avs_enabled(dev);
+	bool avs_enabled;
 
 	if (!dev)
 		return -EINVAL;
+
+	avs_enabled  = msm_spm_drv_is_avs_enabled(dev);
 
 	if (!msm_spm_pmic_arb_present(dev))
 		return -ENOSYS;

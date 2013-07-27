@@ -1,6 +1,6 @@
 /*
    BlueZ - Bluetooth protocol stack for Linux
-   Copyright (c) 2000-2001, 2010-2012, Code Aurora Forum. All rights reserved.
+   Copyright (c) 2000-2001, 2010-2012, The Linux Foundation. All rights reserved.
 
    Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>
 
@@ -26,7 +26,6 @@
 #define __HCI_CORE_H
 
 #include <net/bluetooth/hci.h>
-#include <linux/wakelock.h>
 /* HCI upper protocols */
 #define HCI_PROTO_L2CAP	0
 #define HCI_PROTO_SCO	1
@@ -327,7 +326,6 @@ struct hci_conn {
 
 	struct work_struct work_add;
 	struct work_struct work_del;
-	struct wake_lock idle_lock;
 	struct device	dev;
 	atomic_t	devref;
 

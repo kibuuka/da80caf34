@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -94,6 +94,14 @@ static char wcd9xxx_event_string[][64] = {
 	"WCD9XXX_EVENT_LAST",
 };
 
+struct wcd9xxx_resmgr_cond_entry {
+	unsigned short reg;
+	int shift;
+	bool invert;
+	enum wcd9xxx_resmgr_cond cond;
+	struct list_head list;
+};
+
 static enum wcd9xxx_clock_type wcd9xxx_save_clock(struct wcd9xxx_resmgr
 						  *resmgr);
 static void wcd9xxx_restore_clock(struct wcd9xxx_resmgr *resmgr,
@@ -116,7 +124,8 @@ static void wcd9xxx_disable_bg(struct wcd9xxx_resmgr *resmgr)
 	/* Notify bg mode change */
 	wcd9xxx_resmgr_notifier_call(resmgr, WCD9XXX_EVENT_PRE_BG_OFF);
 	/* Disable bg */
-	snd_soc_write(resmgr->codec, WCD9XXX_A_BIAS_CENTRAL_BG_CTL, 0x00);
+	snd_soc_update_bits(resmgr->codec, WCD9XXX_A_BIAS_CENTRAL_BG_CTL,
+			    0x03, 0x00);
 	usleep_range(100, 100);
 	/* Notify bg mode change */
 	wcd9xxx_resmgr_notifier_call(resmgr, WCD9XXX_EVENT_POST_BG_OFF);
@@ -191,6 +200,49 @@ static void wcd9xxx_disable_clock_block(struct wcd9xxx_resmgr *resmgr)
 	else
 		wcd9xxx_resmgr_notifier_call(resmgr,
 					     WCD9XXX_EVENT_POST_MCLK_OFF);
+	pr_debug("%s: leave\n", __func__);
+}
+
+void wcd9xxx_resmgr_post_ssr(struct wcd9xxx_resmgr *resmgr)
+{
+	int old_bg_audio_users, old_bg_mbhc_users;
+	int old_clk_rco_users, old_clk_mclk_users;
+
+	pr_debug("%s: enter\n", __func__);
+	WCD9XXX_BCL_ASSERT_LOCKED(resmgr);
+
+	old_bg_audio_users = resmgr->bg_audio_users;
+	old_bg_mbhc_users = resmgr->bg_mbhc_users;
+	old_clk_rco_users = resmgr->clk_rco_users;
+	old_clk_mclk_users = resmgr->clk_mclk_users;
+	resmgr->bg_audio_users = 0;
+	resmgr->bg_mbhc_users = 0;
+	resmgr->bandgap_type = WCD9XXX_BANDGAP_OFF;
+	resmgr->clk_rco_users = 0;
+	resmgr->clk_mclk_users = 0;
+	resmgr->clk_type = WCD9XXX_CLK_OFF;
+
+	if (old_bg_audio_users) {
+		while (old_bg_audio_users--)
+			wcd9xxx_resmgr_get_bandgap(resmgr,
+						  WCD9XXX_BANDGAP_AUDIO_MODE);
+	}
+
+	if (old_bg_mbhc_users) {
+		while (old_bg_mbhc_users--)
+			wcd9xxx_resmgr_get_bandgap(resmgr,
+						  WCD9XXX_BANDGAP_MBHC_MODE);
+	}
+
+	if (old_clk_mclk_users) {
+		while (old_clk_mclk_users--)
+			wcd9xxx_resmgr_get_clk_block(resmgr, WCD9XXX_CLK_MCLK);
+	}
+
+	if (old_clk_rco_users) {
+		while (old_clk_rco_users--)
+			wcd9xxx_resmgr_get_clk_block(resmgr, WCD9XXX_CLK_RCO);
+	}
 	pr_debug("%s: leave\n", __func__);
 }
 
@@ -339,8 +391,6 @@ int wcd9xxx_resmgr_enable_config_mode(struct snd_soc_codec *codec, int enable)
 	} else {
 		snd_soc_update_bits(codec, WCD9XXX_A_BIAS_OSC_BG_CTL, 0x1, 0);
 		snd_soc_update_bits(codec, WCD9XXX_A_RC_OSC_FREQ, 0x80, 0);
-		/* clk source to ext clk and clk buff ref to VBG */
-		snd_soc_update_bits(codec, WCD9XXX_A_CLK_BUFF_EN1, 0x0C, 0x04);
 	}
 
 	return 0;
@@ -371,9 +421,14 @@ static void wcd9xxx_enable_clock_block(struct wcd9xxx_resmgr *resmgr,
 			snd_soc_write(codec, WCD9XXX_A_CLK_BUFF_EN2, 0x02);
 			wcd9xxx_resmgr_enable_config_mode(codec, 0);
 		}
+		/* clk source to ext clk and clk buff ref to VBG */
+		snd_soc_update_bits(codec, WCD9XXX_A_CLK_BUFF_EN1, 0x0C, 0x04);
 	}
 
 	snd_soc_update_bits(codec, WCD9XXX_A_CLK_BUFF_EN1, 0x01, 0x01);
+	/* sleep time required by codec hardware to enable clock buffer */
+	usleep_range(1000, 1200);
+
 	snd_soc_update_bits(codec, WCD9XXX_A_CLK_BUFF_EN2, 0x02, 0x00);
 
 	/* on MCLK */
@@ -596,6 +651,97 @@ done:
 	return rc;
 }
 
+void wcd9xxx_resmgr_cond_trigger_cond(struct wcd9xxx_resmgr *resmgr,
+				      enum wcd9xxx_resmgr_cond cond)
+{
+	struct list_head *l;
+	struct wcd9xxx_resmgr_cond_entry *e;
+	bool set;
+
+	pr_debug("%s: enter\n", __func__);
+	set = !!test_bit(cond, &resmgr->cond_flags);
+	list_for_each(l, &resmgr->update_bit_cond_h) {
+		e = list_entry(l, struct wcd9xxx_resmgr_cond_entry, list);
+		if (e->cond == cond)
+			snd_soc_update_bits(resmgr->codec, e->reg,
+					    1 << e->shift,
+					    (set ? !e->invert : e->invert)
+					    << e->shift);
+	}
+	pr_debug("%s: leave\n", __func__);
+}
+
+void wcd9xxx_resmgr_cond_update_cond(struct wcd9xxx_resmgr *resmgr,
+				     enum wcd9xxx_resmgr_cond cond, bool set)
+{
+	mutex_lock(&resmgr->update_bit_cond_lock);
+	if ((set && !test_and_set_bit(cond, &resmgr->cond_flags)) ||
+	    (!set && test_and_clear_bit(cond, &resmgr->cond_flags))) {
+		pr_debug("%s: Resource %d condition changed to %s\n", __func__,
+			 cond, set ? "set" : "clear");
+		wcd9xxx_resmgr_cond_trigger_cond(resmgr, cond);
+	}
+	mutex_unlock(&resmgr->update_bit_cond_lock);
+}
+
+int wcd9xxx_resmgr_add_cond_update_bits(struct wcd9xxx_resmgr *resmgr,
+					enum wcd9xxx_resmgr_cond cond,
+					unsigned short reg, int shift,
+					bool invert)
+{
+	struct wcd9xxx_resmgr_cond_entry *entry;
+
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return -ENOMEM;
+
+	entry->cond = cond;
+	entry->reg = reg;
+	entry->shift = shift;
+	entry->invert = invert;
+
+	mutex_lock(&resmgr->update_bit_cond_lock);
+	list_add_tail(&entry->list, &resmgr->update_bit_cond_h);
+
+	wcd9xxx_resmgr_cond_trigger_cond(resmgr, cond);
+	mutex_unlock(&resmgr->update_bit_cond_lock);
+
+	return 0;
+}
+
+/*
+ * wcd9xxx_resmgr_rm_cond_update_bits :
+ * Clear bit and remove from the conditional bit update list
+ */
+int wcd9xxx_resmgr_rm_cond_update_bits(struct wcd9xxx_resmgr *resmgr,
+				       enum wcd9xxx_resmgr_cond cond,
+				       unsigned short reg, int shift,
+				       bool invert)
+{
+	struct list_head *l, *next;
+	struct wcd9xxx_resmgr_cond_entry *e = NULL;
+
+	pr_debug("%s: enter\n", __func__);
+	mutex_lock(&resmgr->update_bit_cond_lock);
+	list_for_each_safe(l, next, &resmgr->update_bit_cond_h) {
+		e = list_entry(l, struct wcd9xxx_resmgr_cond_entry, list);
+		if (e->reg == reg && e->shift == shift && e->invert == invert) {
+			snd_soc_update_bits(resmgr->codec, e->reg,
+					    1 << e->shift,
+					    e->invert << e->shift);
+			list_del(&e->list);
+			mutex_unlock(&resmgr->update_bit_cond_lock);
+			kfree(e);
+			return 0;
+		}
+	}
+	mutex_unlock(&resmgr->update_bit_cond_lock);
+	pr_err("%s: Cannot find update bit entry reg 0x%x, shift %d\n",
+	       __func__, e ? e->reg : 0, e ? e->shift : 0);
+
+	return -EINVAL;
+}
+
 int wcd9xxx_resmgr_register_notifier(struct wcd9xxx_resmgr *resmgr,
 				     struct notifier_block *nblock)
 {
@@ -625,15 +771,19 @@ int wcd9xxx_resmgr_init(struct wcd9xxx_resmgr *resmgr,
 	resmgr->pdata = pdata;
 	resmgr->reg_addr = reg_addr;
 
+	INIT_LIST_HEAD(&resmgr->update_bit_cond_h);
+
 	BLOCKING_INIT_NOTIFIER_HEAD(&resmgr->notifier);
 
 	mutex_init(&resmgr->codec_resource_lock);
+	mutex_init(&resmgr->update_bit_cond_lock);
 
 	return 0;
 }
 
 void wcd9xxx_resmgr_deinit(struct wcd9xxx_resmgr *resmgr)
 {
+	mutex_destroy(&resmgr->update_bit_cond_lock);
 	mutex_destroy(&resmgr->codec_resource_lock);
 }
 

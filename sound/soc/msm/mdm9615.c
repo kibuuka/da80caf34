@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -2052,6 +2052,46 @@ static struct snd_soc_dai_link mdm9615_dai_common[] = {
 		.codec_dai_name = "msm-stub-tx",
 		.ignore_suspend = 1,
 	},
+	{
+		.name = "CS-VOICE HOST RX CAPTURE",
+		.stream_name = "CS-VOICE HOST RX CAPTURE",
+		.cpu_dai_name = "msm-dai-stub",
+		.platform_name  = "msm-host-pcm-voice",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-tx",
+		.ignore_suspend = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			    SND_SOC_DPCM_TRIGGER_POST},
+	},
+	{
+		.name = "CS-VOICE HOST RX PLAYBACK",
+		.stream_name = "CS-VOICE HOST RX PLAYBACK",
+		.cpu_dai_name = "msm-dai-stub",
+		.platform_name  = "msm-host-pcm-voice",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-rx",
+		.ignore_suspend = 1,
+	},
+	{
+		.name = "CS-VOICE HOST TX CAPTURE",
+		.stream_name = "CS-VOICE HOST TX CAPTURE",
+		.cpu_dai_name = "msm-dai-stub",
+		.platform_name  = "msm-host-pcm-voice",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-tx",
+		.ignore_suspend = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			    SND_SOC_DPCM_TRIGGER_POST},
+	},
+	{
+		.name = "CS-VOICE HOST TX PLAYBACK",
+		.stream_name = "CS-VOICE HOST TX PLAYBACK",
+		.cpu_dai_name = "msm-dai-stub",
+		.platform_name  = "msm-host-pcm-voice",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-rx",
+		.ignore_suspend = 1,
+	},
 
 	/* Backend BT DAI Links */
 	{
@@ -2296,6 +2336,9 @@ static int __init mdm9615_audio_init(void)
 {
 	int ret;
 
+	/* Set GPIO headset detection by default */
+	hs_detect_use_gpio = true;
+
 	if (!cpu_is_msm9615()) {
 		pr_err("%s: Not the right machine type\n", __func__);
 		return -ENODEV ;
@@ -2372,8 +2415,6 @@ static int __init mdm9615_audio_init(void)
 		pr_err("%s: SIF or Spare ptr are NULL", __func__);
 	sif_virt_addr = ioremap(LPASS_SIF_MUX_ADDR, 4);
 	secpcm_portslc_virt_addr = ioremap(SEC_PCM_PORT_SLC_ADDR, 4);
-
-	hs_detect_use_gpio = true;
 
 	return ret;
 }

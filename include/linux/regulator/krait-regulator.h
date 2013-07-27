@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -13,7 +13,8 @@
 #ifndef __KRAIT_REGULATOR_H__
 #define __KRAIT_REGULATOR_H__
 
-#define KRAIT_REGULATOR_DRIVER_NAME "krait-power-regulator"
+#define KRAIT_REGULATOR_DRIVER_NAME	"krait-power-regulator"
+#define KRAIT_PDN_DRIVER_NAME		"krait-pdn"
 
 /**
  * krait_power_init - driver initialization function

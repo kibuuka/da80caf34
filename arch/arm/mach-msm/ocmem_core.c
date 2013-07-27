@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,6 +17,7 @@
 
 #include <mach/ocmem_priv.h>
 #include <mach/rpm-smd.h>
+#include <mach/scm.h>
 
 static unsigned num_regions;
 static unsigned num_macros;
@@ -49,7 +50,6 @@ static struct ocmem_hw_region *region_ctrl;
 static struct mutex region_ctrl_lock;
 static void *ocmem_base;
 
-#define OCMEM_V1_REGIONS 3
 #define OCMEM_V1_MACROS 8
 #define OCMEM_V1_MACRO_SZ (SZ_64K)
 
@@ -66,7 +66,7 @@ static void *ocmem_base;
 #define NUM_PORTS_SHIFT (0)
 #define GFX_MPU_SHIFT (12)
 
-#define NUM_MACROS_MASK (0xF << 8)
+#define NUM_MACROS_MASK (0x3F << 8)
 #define NUM_MACROS_SHIFT (8)
 
 #define INTERLEAVING_MASK (0x1 << 17)
@@ -97,8 +97,11 @@ static void *ocmem_base;
 #define REGION_SLEEP_PERI_ON 0x00007777
 
 #define REGION_DEFAULT_OFF REGION_SLEEP_NO_RETENTION
-#define REGION_DEFAULT_ON REGION_NORMAL_PASSTHROUGH
+#define REGION_DEFAULT_ON REGION_FORCE_CORE_ON
 #define REGION_DEFAULT_RETENTION REGION_SLEEP_PERI_OFF
+
+#define REGION_STAGING_SET(x) (REGION_SLEEP_PERI_OFF & (0xF << (x * 0x4)))
+#define REGION_ON_SET(x) (REGION_DEFAULT_OFF & (0xF << (x * 0x4)))
 
 enum rpm_macro_state {
 	rpm_macro_off = 0x0,
@@ -195,6 +198,51 @@ static int read_region_state(unsigned region_num)
 
 	return state;
 }
+#ifndef CONFIG_MSM_OCMEM_POWER_DISABLE
+static int commit_region_staging(unsigned region_num, unsigned start_m,
+				unsigned new_state)
+{
+	int rc = -1;
+	unsigned state = 0x0;
+	unsigned read_state = 0x0;
+	unsigned curr_state = 0x0;
+
+	if (region_num >= num_regions)
+		return -EINVAL;
+
+	if (rpm_power_control)
+		return 0;
+	else {
+		if (new_state != REGION_DEFAULT_OFF) {
+			curr_state = read_region_state(region_num);
+			state = curr_state | REGION_STAGING_SET(start_m);
+			rc = ocmem_write(state,
+				ocmem_base + PSCGC_CTL_n(region_num));
+			/* Barrier to commit the region state */
+			mb();
+			read_state = read_region_state(region_num);
+			if (new_state == REGION_DEFAULT_ON) {
+				curr_state = read_region_state(region_num);
+				state = curr_state ^ REGION_ON_SET(start_m);
+				rc = ocmem_write(state,
+					ocmem_base + PSCGC_CTL_n(region_num));
+				/* Barrier to commit the region state */
+				mb();
+				read_state = read_region_state(region_num);
+			}
+		} else {
+			curr_state = read_region_state(region_num);
+			state = curr_state ^ REGION_STAGING_SET(start_m);
+			rc = ocmem_write(state,
+				ocmem_base + PSCGC_CTL_n(region_num));
+			/* Barrier to commit the region state */
+			mb();
+			read_state = read_region_state(region_num);
+		}
+	}
+	return 0;
+}
+#endif
 
 /* Returns the current state of a OCMEM macro that belongs to a region */
 static int read_macro_state(unsigned region_num, unsigned macro_num)
@@ -488,7 +536,7 @@ static int ocmem_gfx_mpu_set(unsigned long offset, unsigned long len)
 	if (mpu_start < 0)
 		/* Avoid underflow */
 		mpu_start = 0;
-	mpu_end = ((offset+len) >> GFX_MPU_SHIFT) - 1;
+	mpu_end = ((offset+len) >> GFX_MPU_SHIFT);
 	BUG_ON(mpu_end < 0);
 
 	pr_debug("ocmem: mpu: start %x end %x\n", mpu_start, mpu_end);
@@ -515,6 +563,23 @@ static int do_unlock(enum ocmem_client id, unsigned long offset,
 	ocmem_clear(offset, len);
 	return 0;
 }
+
+int ocmem_enable_sec_program(int sec_id)
+{
+	return 0;
+}
+
+int ocmem_enable_dump(enum ocmem_client id, unsigned long offset,
+			unsigned long len)
+{
+	return 0;
+}
+
+int ocmem_disable_dump(enum ocmem_client id, unsigned long offset,
+			unsigned long len)
+{
+	return 0;
+}
 #else
 static int ocmem_gfx_mpu_set(unsigned long offset, unsigned long len)
 {
@@ -533,19 +598,117 @@ static int commit_region_modes(void)
 static int do_lock(enum ocmem_client id, unsigned long offset,
 			unsigned long len, enum region_mode mode)
 {
-	return 0;
+	int rc;
+	struct ocmem_tz_lock {
+		u32 id;
+		u32 offset;
+		u32 size;
+	} request;
+
+	request.id = get_tz_id(id);
+	request.offset = offset;
+	request.size = len;
+
+	rc = scm_call(OCMEM_SVC_ID, OCMEM_LOCK_CMD_ID, &request,
+				sizeof(request), NULL, 0);
+	if (rc)
+		pr_err("ocmem: Failed to lock region %s[%lx -- %lx] ret = %d\n",
+				get_name(id), offset, offset + len - 1, rc);
+	return rc;
 }
 
 static int do_unlock(enum ocmem_client id, unsigned long offset,
 			unsigned long len)
 {
-	return 0;
+	int rc;
+	struct ocmem_tz_unlock {
+		u32 id;
+		u32 offset;
+		u32 size;
+	} request;
+
+	request.id = get_tz_id(id);
+	request.offset = offset;
+	request.size = len;
+
+	rc = scm_call(OCMEM_SVC_ID, OCMEM_UNLOCK_CMD_ID, &request,
+				sizeof(request), NULL, 0);
+	if (rc)
+		pr_err("ocmem: Failed to unlock region %s[%lx -- %lx] ret = %d\n",
+				get_name(id), offset, offset + len - 1, rc);
+	return rc;
+}
+
+int ocmem_enable_dump(enum ocmem_client id, unsigned long offset,
+			unsigned long len)
+{
+	int rc;
+	struct ocmem_tz_en_dump {
+		u32 id;
+		u32 offset;
+		u32 size;
+	} request;
+
+	request.id = get_tz_id(id);
+	request.offset = offset;
+	request.size = len;
+
+	rc = scm_call(OCMEM_SVC_ID, OCMEM_ENABLE_DUMP_CMD_ID, &request,
+				sizeof(request), NULL, 0);
+	if (rc)
+		pr_err("ocmem: Failed to enable dump %s[%lx -- %lx] ret = %d\n",
+				get_name(id), offset, offset + len - 1, rc);
+	return rc;
+}
+
+int ocmem_disable_dump(enum ocmem_client id, unsigned long offset,
+			unsigned long len)
+{
+	int rc;
+	struct ocmem_tz_dis_dump {
+		u32 id;
+		u32 offset;
+		u32 size;
+	} request;
+
+	request.id = get_tz_id(id);
+	request.offset = offset;
+	request.size = len;
+
+	rc = scm_call(OCMEM_SVC_ID, OCMEM_DISABLE_DUMP_CMD_ID, &request,
+				sizeof(request), NULL, 0);
+	if (rc)
+		pr_err("ocmem: Failed to disable dump %s[%lx -- %lx] ret = %d\n",
+				get_name(id), offset, offset + len - 1, rc);
+	return rc;
+}
+
+int ocmem_enable_sec_program(int sec_id)
+{
+	int rc, scm_ret = 0;
+	struct msm_scm_sec_cfg {
+		unsigned int id;
+		unsigned int spare;
+	} cfg;
+
+	cfg.id = sec_id;
+
+	rc = scm_call(OCMEM_SECURE_SVC_ID, OCMEM_SECURE_CFG_ID, &cfg,
+			sizeof(cfg), &scm_ret, sizeof(scm_ret));
+
+	if (rc || scm_ret) {
+		pr_err("ocmem: Failed to enable secure programming\n");
+		return rc ? rc : -EINVAL;
+	}
+
+	return rc;
 }
 #endif /* CONFIG_MSM_OCMEM_NONSECURE */
 
 int ocmem_lock(enum ocmem_client id, unsigned long offset, unsigned long len,
 					enum region_mode mode)
 {
+	int rc = 0;
 
 	if (len < OCMEM_MIN_ALLOC) {
 		pr_err("ocmem: Invalid len %lx for lock\n", len);
@@ -562,30 +725,41 @@ int ocmem_lock(enum ocmem_client id, unsigned long offset, unsigned long len,
 
 	commit_region_modes();
 
-	do_lock(id, offset, len, mode);
+	rc = do_lock(id, offset, len, mode);
+	if (rc)
+		goto lock_fail;
 
 	mutex_unlock(&region_ctrl_lock);
 	return 0;
-
+lock_fail:
+	switch_region_mode(offset, len, MODE_DEFAULT);
 switch_region_fail:
+	ocmem_gfx_mpu_remove();
 	mutex_unlock(&region_ctrl_lock);
 	return -EINVAL;
 }
 
 int ocmem_unlock(enum ocmem_client id, unsigned long offset, unsigned long len)
 {
+	int rc = 0;
+
 	if (id == OCMEM_GRAPHICS)
 		ocmem_gfx_mpu_remove();
 
 	mutex_lock(&region_ctrl_lock);
-	do_unlock(id, offset, len);
+	rc = do_unlock(id, offset, len);
+	if (rc)
+		goto unlock_fail;
 	switch_region_mode(offset, len , MODE_DEFAULT);
 	commit_region_modes();
 	mutex_unlock(&region_ctrl_lock);
 	return 0;
+unlock_fail:
+	mutex_unlock(&region_ctrl_lock);
+	return -EINVAL;
 }
 
-#if defined(CONFIG_MSM_OCMEM_POWER_DISABLE)
+#if defined(CONFIG_MSM_OCMEM_DEBUG_ALWAYS_ON)
 static int ocmem_core_set_default_state(void)
 {
 	int rc = 0;
@@ -599,12 +773,16 @@ static int ocmem_core_set_default_state(void)
 	if (rc < 0)
 		return rc;
 
-	rc = ocmem_enable_br_clock();
-	if (rc < 0)
-		return rc;
 	return 0;
 }
+#else
+static int ocmem_core_set_default_state(void)
+{
+	return 0;
+}
+#endif
 
+#if defined(CONFIG_MSM_OCMEM_POWER_DISABLE)
 /* Initializes a region to be turned ON in wide mode */
 static int ocmem_region_set_default_state(unsigned int r_num)
 {
@@ -629,15 +807,9 @@ static int ocmem_region_set_default_state(unsigned int region_num)
 {
 	return 0;
 }
-
-static int ocmem_core_set_default_state(void)
-{
-	return 0;
-}
 #endif
 
 #if defined(CONFIG_MSM_OCMEM_POWER_DEBUG)
-
 static int read_hw_region_state(unsigned region_num)
 {
 	int state;
@@ -825,9 +997,11 @@ static int switch_power_state(int id, unsigned long offset, unsigned long len,
 			apply_macro_vote(id, i, j,
 				hw_macro_state(new_state));
 			aggregate_macro_state(i, j);
+			commit_region_staging(i, j, new_state);
 		}
 		aggregate_region_state(i);
-		commit_region_state(i);
+		if (rpm_power_control)
+			commit_region_state(i);
 		len -= region_size;
 
 		/* If we voted ON/retain the banks must never be OFF */
@@ -964,30 +1138,19 @@ int ocmem_core_init(struct platform_device *pdev)
 
 	hw_ver = ocmem_read(ocmem_base + OC_HW_PROFILE);
 
-	if (pdata->nr_regions != OCMEM_V1_REGIONS) {
-		pr_err("Invalid number of regions (%d)\n", pdata->nr_regions);
-		goto hw_not_supported;
-	}
-
 	num_macros = (hw_ver & NUM_MACROS_MASK) >> NUM_MACROS_SHIFT;
 	num_ports = (hw_ver & NUM_PORTS_MASK) >> NUM_PORTS_SHIFT;
 
-	if (num_macros != OCMEM_V1_MACROS) {
+	if (num_macros != pdata->nr_macros) {
 		pr_err("Invalid number of macros (%d)\n", pdata->nr_macros);
 		goto hw_not_supported;
 	}
 
 	interleaved = (hw_ver & INTERLEAVING_MASK) >> INTERLEAVING_SHIFT;
 
-	if (interleaved == false) {
-		pr_err("Interleaving is disabled\n");
-		goto hw_not_supported;
-	}
-
 	num_regions = pdata->nr_regions;
 
 	pdata->interleaved = true;
-	pdata->nr_macros = num_macros;
 	pdata->nr_ports = num_ports;
 	macro_size = OCMEM_V1_MACRO_SZ * 2;
 	num_banks = num_ports / 2;

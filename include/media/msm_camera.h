@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1396,6 +1396,7 @@ struct msm_camera_csiphy_params {
 	uint8_t settle_cnt;
 	uint16_t lane_mask;
 	uint8_t combo_mode;
+	uint8_t csid_core;
 };
 
 struct msm_camera_csi2_params {
@@ -1550,6 +1551,7 @@ struct ispif_cfg_data {
 enum msm_camera_i2c_reg_addr_type {
 	MSM_CAMERA_I2C_BYTE_ADDR = 1,
 	MSM_CAMERA_I2C_WORD_ADDR,
+	MSM_CAMERA_I2C_3B_ADDR,
 };
 
 struct msm_camera_i2c_reg_array {
@@ -1593,6 +1595,19 @@ enum camera_vreg_type {
 	REG_LDO,
 	REG_VS,
 	REG_GPIO,
+};
+
+enum msm_camera_vreg_name_t {
+	CAM_VDIG,
+	CAM_VIO,
+	CAM_VANA,
+	CAM_VAF,
+	CAM_VREG_MAX,
+};
+
+struct msm_camera_csi_lane_params {
+	uint16_t csi_lane_assign;
+	uint16_t csi_lane_mask;
 };
 
 struct camera_vreg_t {

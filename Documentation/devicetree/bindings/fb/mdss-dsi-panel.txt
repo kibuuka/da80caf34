@@ -1,6 +1,6 @@
 Qualcomm mdss-dsi-panel
 
-mdss-dsi-panel is a dsi panel driver which supports panels that
+mdss-dsi-panel is a dsi panel device which supports panels that
 are compatable with MIPI display serial interface specification.
 
 Required properties:
@@ -9,11 +9,17 @@ Required properties:
 					the panel driver. By default this property will be
 					set to "disable". Will be set to "ok/okay" status
 					for specific platforms.
+- qcom,dsi-ctrl-phandle:		Specifies the phandle for the DSI controller that
+					this panel will be mapped to.
 - qcom,mdss-pan-res:			A two dimensional array that specifies the panel
 					resolution.
 - qcom,mdss-pan-bpp:			Specifies the panel bits per pixel. Default value is 24(rgb888).
 					18 = for rgb666
 					16 = for rgb565
+- qcom,mdss-pan-dest:			A string that specifies the destination display for the panel.
+					Default is "display_1".
+					"display_1" = DISPLAY_1
+					"display_2" = DISPLAY_2
 - qcom,panel-phy-regulatorSettings:	An array of length 7 that specifies the PHY
 					regulator settings for the panel.
 - qcom,panel-phy-timingSettings:	An array of length 12 that specifies the PHY
@@ -45,15 +51,40 @@ Required properties:
 					--> size of payload
 					--> payload.
 
-Required structure:
-- A qcom,mdss-dsi-panel node must be a child of an mdss-dsi controller node that links to
-    one of the two DSI controllers.
-
-
 Optional properties:
 - label:		        	A string used as a descriptive name of the panel
 - qcom,enable-gpio:			Specifies the panel lcd/display enable gpio.
 - qcom,rst-gpio:			Specifies the panel reset gpio.
+- qcom,te-gpio:				Specifies the gpio used for TE.
+- qcom,pwm-lpg-channel:			LPG channel for backlight.
+- qcom,pwm-period:			PWM period in microseconds.
+- qcom,pwm-pmic-gpio:			PMIC gpio binding to backlight.
+- qcom,mdss-pan-broadcast-mode:		Boolean used to enable broadcast mode.
+- qcom,cont-splash-enabled:		Boolean used to enable continuous splash mode.
+- qcom,fbc-enabled:			Boolean used to enable frame buffer compression mode.
+- qcom,fbc-mode-select:			An array of length 7 that specifies the fbc mode supported
+					by the panel. FBC enabled panels may or may not support
+					the modes specified here. Each entry will
+					have the format specified below:
+					--> compressed bpp supported by the panel
+					--> component packing
+					--> enable/disable quantization error calculation
+					--> Bias for CD
+					--> enable/disable PAT mode
+					--> enable/disable VLC mode
+					--> enable/disable BFLC mode
+- qcom,fbc-budget-ctl:			An array of length 3 that specifies the budget control settings
+					supported by the fbc enabled panel. Each entry will have the format
+					specified below:
+					--> per line extra budget
+					--> extra budget level
+					--> per block budget
+- qcom,fbc-lossy-mode:			An array of 3 that specifies the lossy mode settings
+					supported by the fbc enabled panel. Each entry will
+					have the format specified below:
+					--> lossless mode threshold
+					--> lossy mode threshold
+					--> lossy RGB threshold
 - qcom,mdss-pan-porch-values:		An array of size 6 that specifies the panel blanking values.
 - qcom,mdss-pan-underflow-clr:		Specifies the controller settings for the panel underflow clear
 					settings. Default value is 0xff.
@@ -68,6 +99,15 @@ Optional properties:
 - qcom,mdss-pan-dsi-mode:		Specifies the panel operating mode.
 					0 = enable video mode(default mode).
 					1 = enable command mode.
+- qcom,mdss-vsync-enable:		Specifies Tear Check configuration.
+					0 = TE disable.
+					1 = TE enable.
+- qcom,mdss-hw-vsync-mode:		Specifies TE type.
+					0 = software vsync.
+					1 = hardware vsync (TE gpio pin).
+- qcom,mdss-pan-te-sel:			Specifies TE operating mode.
+					0 = TE through embedded dcs command
+					1 = TE through TE gpio pin.
 - qcom,mdss-pan-dsi-h-pulse-mode:	Specifies the pulse mode option for the panel.
 					0 = Don't send hsa/he following vs/ve packet(default)
 					1 = Send hsa/he following vs/ve packet
@@ -102,6 +142,15 @@ Optional properties:
 					5 = DSI_RGB_SWAP_GBR
 - qcom,mdss-pan-dsi-data-lanes:		An array that specifies the data lanes enabled.
 					<1 1 0 0> = data lanes 1 and 2 are enabled.(default).
+- qcom,mdss-pan-dsi-dlane-swap:		Specifies the data lane swap configuration.
+					0 = <0 1 2 3> (default value)
+					1 = <3 0 1 2>
+					2 = <2 3 0 1>
+					3 = <1 2 3 0>
+					4 = <0 3 2 1>
+					5 = <1 0 3 2>
+					6 = <2 1 0 3>
+					7 = <3 2 1 0>
 - qcom,mdss-pan-dsi-t-clk:		An array that specifies the byte clock cycles
 					before and after each mode switch.
 - qcom,mdss-pan-dsi-stream:		Specifies the packet stream to be used.
@@ -120,38 +169,61 @@ Optional properties:
 					6 = Software trigger and TE
 - qcom,mdss-pan-dsi-frame-rate:		Specifies the frame rate for the panel.
 					60 = 60 frames per second (default)
+- qcom,on-cmds-dsi-state:		A string that Specifies the ctrl state for sending ON commands.
+					Supported modes are "DSI_LP_MODE" and "DSI_HS_MODE".
+- qcom,off-cmds-dsi-state:		A string that Specifies the ctrl state for sending ON commands.
+					Supported modes are "DSI_LP_MODE" and "DSI_HS_MODE".
+
+
+- qcom,panel-on-cmds: 			A byte stream formed by multiple dcs packets base on
+					qcom dsi controller protocol.
+					byte 0 : dcs data type
+					byte 1 : set to indicate this is an individual packet
+						(no chain).
+					byte 2 : virtual channel number
+					byte 3 : expect ack from client (dcs read command)
+					byte 4 : wait number of specified ms after dcs command
+						transmitted
+					byte 5, 6: 16 bits length in network byte order
+					byte 7 and beyond: number byte of payload
 
 Note, if a given optional qcom,* binding is not present, then the driver will configure
 the default values specified.
 
 Example:
-	qcom,mdss_dsi@fd922800 {
-
-		qcom,mdss_dsi_sim_video {
-			compatible = "qcom,mdss-dsi-panel";
-			label = "simulator video mode dsi panel";
-			status = "disable";
-			qcom,mdss-pan-res = <640 480>;
-			qcom,mdss-pan-bpp = <24>;
-			qcom,mdss-pan-porch-values = <6 2 6 6 2 6>;
-			qcom,mdss-pan-underflow-clr = <0xff>;
-			qcom,mdss-pan-bl-levels = <1 15>;
-			qcom,mdss-pan-dsi-mode = <0>;
-			qcom,mdss-pan-dsi-h-pulse-mode = <1>;
-			qcom,mdss-pan-dsi-h-power-stop = <1 1 1>;
-			qcom,mdss-pan-dsi-bllp-power-stop = <1 1>;
-			qcom,mdss-pan-dsi-traffic-mode = <0>;
-			qcom,mdss-pan-dsi-dst-format = <3>;
-			qcom,mdss-pan-dsi-vc = <0>;
-			qcom,mdss-pan-dsi-rgb-swap = <0>;
-			qcom,mdss-pan-dsi-data-lanes = <1 1 0 0>;
-			qcom,mdss-pan-dsi-t-clk = <0x24 0x03>;
-			qcom,mdss-pan-dsi-stream = <0>;
-			qcom,mdss-pan-dsi-mdp-tr = <0x04>;
-			qcom,mdss-pan-dsi-dma-tr = <0x04>;
-			qcom,mdss-pan-frame-rate = <60>;
-			qcom,panel-on-cmds = [32 01 00 00 00 02 00 00];
-			qcom,panel-off-cmds = [22 01 00 00 00 00 00];
-		};
-
+/ {
+	qcom,mdss_dsi_sim_video {
+		compatible = "qcom,mdss-dsi-panel";
+		label = "simulator video mode dsi panel";
+		status = "disable";
+		qcom,dsi-ctrl-phandle = <&mdss_dsi0>;
+		qcom,mdss-pan-res = <640 480>;
+		qcom,mdss-pan-bpp = <24>;
+		qcom,mdss-pan-dest = "display_1";
+		qcom,mdss-pan-porch-values = <6 2 6 6 2 6>;
+		qcom,mdss-pan-underflow-clr = <0xff>;
+		qcom,mdss-pan-bl-levels = <1 15>;
+		qcom,mdss-pan-dsi-mode = <0>;
+		qcom,mdss-pan-dsi-h-pulse-mode = <1>;
+		qcom,mdss-pan-dsi-h-power-stop = <1 1 1>;
+		qcom,mdss-pan-dsi-bllp-power-stop = <1 1>;
+		qcom,mdss-pan-dsi-traffic-mode = <0>;
+		qcom,mdss-pan-dsi-dst-format = <3>;
+		qcom,mdss-pan-dsi-vc = <0>;
+		qcom,mdss-pan-dsi-rgb-swap = <0>;
+		qcom,mdss-pan-dsi-data-lanes = <1 1 0 0>;
+		qcom,mdss-pan-dsi-t-clk = <0x24 0x03>;
+		qcom,mdss-pan-dsi-stream = <0>;
+		qcom,mdss-pan-dsi-mdp-tr = <0x04>;
+		qcom,mdss-pan-dsi-dma-tr = <0x04>;
+		qcom,mdss-pan-frame-rate = <60>;
+		qcom,panel-on-cmds = [32 01 00 00 00 00 02 00 00];
+		qcom,on-cmds-dsi-state = "DSI_LP_MODE";
+		qcom,panel-off-cmds = [22 01 00 00 00 00 00];
+		qcom,off-cmds-dsi-state = "DSI LP MODE";
+		qcom,fbc-enabled;
+		qcom,fbc-mode = <12 0 1 2 1 1 1>;
+		qcom,fbc-budget-ctl = <675 5 91>;
+		qcom,fbc-lossy-mode = <0 0xc0 0 3>;
 	};
+};

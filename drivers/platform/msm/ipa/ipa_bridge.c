@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -12,740 +12,508 @@
 
 #include <linux/delay.h>
 #include <linux/ratelimit.h>
+#include <mach/msm_smem.h>
 #include "ipa_i.h"
 
-enum ipa_bridge_id {
+/*
+ * EP0 (teth)
+ * A2_BAM(1)->(12)DMA_BAM->DMA_BAM(13)->(6)IPA_BAM->IPA_BAM(10)->USB_BAM(0)
+ * A2_BAM(0)<-(15)DMA_BAM<-DMA_BAM(14)<-(7)IPA_BAM<-IPA_BAM(11)<-USB_BAM(1)
+ *
+ * EP2 (emb)
+ * A2_BAM(5)->(16)DMA_BAM->DMA_BAM(17)->(8)IPA_BAM->
+ * A2_BAM(4)<-(19)DMA_BAM<-DMA_BAM(18)<-(9)IPA_BAM<-
+ */
+
+#define A2_TETHERED_PIPE_UL      0
+#define DMA_A2_TETHERED_PIPE_UL  15
+#define DMA_IPA_TETHERED_PIPE_UL 14
+#define A2_TETHERED_PIPE_DL      1
+#define DMA_A2_TETHERED_PIPE_DL  12
+#define DMA_IPA_TETHERED_PIPE_DL 13
+
+#define A2_EMBEDDED_PIPE_UL      4
+#define DMA_A2_EMBEDDED_PIPE_UL  19
+#define DMA_IPA_EMBEDDED_PIPE_UL 18
+#define A2_EMBEDDED_PIPE_DL      5
+#define DMA_A2_EMBEDDED_PIPE_DL  16
+#define DMA_IPA_EMBEDDED_PIPE_DL 17
+
+#define IPA_SMEM_PIPE_MEM_SZ 32768
+
+#define IPA_UL_DATA_FIFO_SZ 0xc00
+#define IPA_UL_DESC_FIFO_SZ 0x530
+#define IPA_DL_DATA_FIFO_SZ 0x2400
+#define IPA_DL_DESC_FIFO_SZ 0x8a0
+#define IPA_DL_EMB_DATA_FIFO_SZ 0x1800
+#define IPA_DL_EMB_DESC_FIFO_SZ 0x4e8
+
+#define IPA_SMEM_UL_DATA_FIFO_OFST 0
+#define IPA_SMEM_UL_DESC_FIFO_OFST 0xc00
+#define IPA_SMEM_DL_DATA_FIFO_OFST 0x1130
+#define IPA_SMEM_DL_DESC_FIFO_OFST 0x3530
+#define IPA_SMEM_UL_EMB_DATA_FIFO_OFST 0x3dd0
+#define IPA_SMEM_UL_EMB_DESC_FIFO_OFST 0x49d0
+
+#define IPA_OCIMEM_DL_A2_DATA_FIFO_OFST 0
+#define IPA_OCIMEM_DL_A2_DESC_FIFO_OFST (IPA_OCIMEM_DL_A2_DATA_FIFO_OFST + \
+		IPA_DL_EMB_DATA_FIFO_SZ)
+#define IPA_OCIMEM_DL_IPA_DATA_FIFO_OFST (IPA_OCIMEM_DL_A2_DESC_FIFO_OFST + \
+		IPA_DL_EMB_DESC_FIFO_SZ)
+#define IPA_OCIMEM_DL_IPA_DESC_FIFO_OFST (IPA_OCIMEM_DL_IPA_DATA_FIFO_OFST + \
+		IPA_DL_EMB_DATA_FIFO_SZ)
+
+enum ipa_pipe_type {
 	IPA_DL_FROM_A2,
 	IPA_DL_TO_IPA,
 	IPA_UL_FROM_IPA,
 	IPA_UL_TO_A2,
-	IPA_BRIDGE_ID_MAX
-};
-
-static int polling_min_sleep[IPA_DIR_MAX] = { 950, 950 };
-static int polling_max_sleep[IPA_DIR_MAX] = { 1050, 1050 };
-static int polling_inactivity[IPA_DIR_MAX] = { 4, 4 };
-
-struct ipa_pkt_info {
-	void *buffer;
-	dma_addr_t dma_address;
-	uint32_t len;
-	struct list_head list_node;
+	IPA_PIPE_TYPE_MAX
 };
 
 struct ipa_bridge_pipe_context {
-	struct list_head head_desc_list;
 	struct sps_pipe *pipe;
-	struct sps_connect connection;
-	struct sps_mem_buffer desc_mem_buf;
-	struct sps_register_event register_event;
-	spinlock_t spinlock;
-	u32 len;
-	u32 free_len;
-	struct list_head free_desc_list;
+	bool ipa_facing;
+	bool valid;
 };
 
-static struct ipa_bridge_pipe_context bridge[IPA_BRIDGE_ID_MAX];
+struct ipa_bridge_context {
+	struct ipa_bridge_pipe_context pipe[IPA_PIPE_TYPE_MAX];
+	enum ipa_bridge_type type;
+};
 
-static struct workqueue_struct *ipa_ul_workqueue;
-static struct workqueue_struct *ipa_dl_workqueue;
-static void ipa_do_bridge_work(enum ipa_bridge_dir dir);
+static struct ipa_bridge_context bridge[IPA_BRIDGE_TYPE_MAX];
 
-static u32 alloc_cnt[IPA_DIR_MAX];
-
-static void ul_work_func(struct work_struct *work)
+static void ipa_get_dma_pipe_num(enum ipa_bridge_dir dir,
+		enum ipa_bridge_type type, int *a2, int *ipa)
 {
-	ipa_do_bridge_work(IPA_UL);
+	if (type == IPA_BRIDGE_TYPE_TETHERED) {
+		if (dir == IPA_BRIDGE_DIR_UL) {
+			*a2 = DMA_A2_TETHERED_PIPE_UL;
+			*ipa = DMA_IPA_TETHERED_PIPE_UL;
+		} else {
+			*a2 = DMA_A2_TETHERED_PIPE_DL;
+			*ipa = DMA_IPA_TETHERED_PIPE_DL;
+		}
+	} else {
+		if (dir == IPA_BRIDGE_DIR_UL) {
+			*a2 = DMA_A2_EMBEDDED_PIPE_UL;
+			*ipa = DMA_IPA_EMBEDDED_PIPE_UL;
+		} else {
+			*a2 = DMA_A2_EMBEDDED_PIPE_DL;
+			*ipa = DMA_IPA_EMBEDDED_PIPE_DL;
+		}
+	}
 }
 
-static void dl_work_func(struct work_struct *work)
+static int ipa_get_desc_fifo_sz(enum ipa_bridge_dir dir,
+		enum ipa_bridge_type type)
 {
-	ipa_do_bridge_work(IPA_DL);
+	int sz;
+
+	if (type == IPA_BRIDGE_TYPE_TETHERED) {
+		if (dir == IPA_BRIDGE_DIR_UL)
+			sz = IPA_UL_DESC_FIFO_SZ;
+		else
+			sz = IPA_DL_DESC_FIFO_SZ;
+	} else {
+		if (dir == IPA_BRIDGE_DIR_UL)
+			sz = IPA_UL_DESC_FIFO_SZ;
+		else
+			sz = IPA_DL_EMB_DESC_FIFO_SZ;
+	}
+
+	return sz;
 }
 
-static DECLARE_WORK(ul_work, ul_work_func);
-static DECLARE_WORK(dl_work, dl_work_func);
+static int ipa_get_data_fifo_sz(enum ipa_bridge_dir dir,
+		enum ipa_bridge_type type)
+{
+	int sz;
 
-static int ipa_switch_to_intr_mode(enum ipa_bridge_dir dir)
+	if (type == IPA_BRIDGE_TYPE_TETHERED) {
+		if (dir == IPA_BRIDGE_DIR_UL)
+			sz = IPA_UL_DATA_FIFO_SZ;
+		else
+			sz = IPA_DL_DATA_FIFO_SZ;
+	} else {
+		if (dir == IPA_BRIDGE_DIR_UL)
+			sz = IPA_UL_DATA_FIFO_SZ;
+		else
+			sz = IPA_DL_EMB_DATA_FIFO_SZ;
+	}
+
+	return sz;
+}
+
+static int ipa_get_a2_pipe_num(enum ipa_bridge_dir dir,
+		enum ipa_bridge_type type)
+{
+	int ep;
+
+	if (type == IPA_BRIDGE_TYPE_TETHERED) {
+		if (dir == IPA_BRIDGE_DIR_UL)
+			ep = A2_TETHERED_PIPE_UL;
+		else
+			ep = A2_TETHERED_PIPE_DL;
+	} else {
+		if (dir == IPA_BRIDGE_DIR_UL)
+			ep = A2_EMBEDDED_PIPE_UL;
+		else
+			ep = A2_EMBEDDED_PIPE_DL;
+	}
+
+	return ep;
+}
+
+int ipa_setup_ipa_dma_fifos(enum ipa_bridge_dir dir,
+		enum ipa_bridge_type type,
+		struct sps_mem_buffer *desc,
+		struct sps_mem_buffer *data)
 {
 	int ret;
-	struct ipa_bridge_pipe_context *sys = &bridge[2 * dir];
 
-	ret = sps_get_config(sys->pipe, &sys->connection);
+	ret = sps_setup_bam2bam_fifo(data,
+			IPA_OCIMEM_DL_IPA_DATA_FIFO_OFST,
+			ipa_get_data_fifo_sz(dir, type), 1);
 	if (ret) {
-		IPAERR("sps_get_config() failed %d\n", ret);
-		goto fail;
+		IPAERR("DAFIFO setup fail %d dir %d type %d\n",
+				ret, dir, type);
+		return ret;
 	}
-	sys->register_event.options = SPS_O_EOT;
-	ret = sps_register_event(sys->pipe, &sys->register_event);
+
+	ret = sps_setup_bam2bam_fifo(desc,
+			IPA_OCIMEM_DL_IPA_DESC_FIFO_OFST,
+			ipa_get_desc_fifo_sz(dir, type), 1);
 	if (ret) {
-		IPAERR("sps_register_event() failed %d\n", ret);
-		goto fail;
+		IPAERR("DEFIFO setup fail %d dir %d type %d\n",
+				ret, dir, type);
+		return ret;
 	}
-	sys->connection.options =
-	   SPS_O_AUTO_ENABLE | SPS_O_ACK_TRANSFERS | SPS_O_EOT;
-	ret = sps_set_config(sys->pipe, &sys->connection);
-	if (ret) {
-		IPAERR("sps_set_config() failed %d\n", ret);
-		goto fail;
-	}
-	ret = 0;
-fail:
-	return ret;
+
+	IPADBG("dir=%d type=%d Dpa=%x Dsz=%u Dva=%p dpa=%x dsz=%u dva=%p\n",
+			dir, type, data->phys_base, data->size, data->base,
+			desc->phys_base, desc->size, desc->base);
+
+	return 0;
 }
 
-static int ipa_switch_to_poll_mode(enum ipa_bridge_dir dir)
+int ipa_setup_a2_dma_fifos(enum ipa_bridge_dir dir,
+		enum ipa_bridge_type type,
+		struct sps_mem_buffer *desc,
+		struct sps_mem_buffer *data)
 {
 	int ret;
-	struct ipa_bridge_pipe_context *sys = &bridge[2 * dir];
 
-	ret = sps_get_config(sys->pipe, &sys->connection);
-	if (ret) {
-		IPAERR("sps_get_config() failed %d\n", ret);
-		goto fail;
+	if (type == IPA_BRIDGE_TYPE_TETHERED) {
+		if (dir == IPA_BRIDGE_DIR_UL) {
+			desc->base = ipa_ctx->smem_pipe_mem +
+				IPA_SMEM_UL_DESC_FIFO_OFST;
+			desc->phys_base = smem_virt_to_phys(desc->base);
+			desc->size = ipa_get_desc_fifo_sz(dir, type);
+			data->base = ipa_ctx->smem_pipe_mem +
+				IPA_SMEM_UL_DATA_FIFO_OFST;
+			data->phys_base = smem_virt_to_phys(data->base);
+			data->size = ipa_get_data_fifo_sz(dir, type);
+		} else {
+			desc->base = ipa_ctx->smem_pipe_mem +
+				IPA_SMEM_DL_DESC_FIFO_OFST;
+			desc->phys_base = smem_virt_to_phys(desc->base);
+			desc->size = ipa_get_desc_fifo_sz(dir, type);
+			data->base = ipa_ctx->smem_pipe_mem +
+				IPA_SMEM_DL_DATA_FIFO_OFST;
+			data->phys_base = smem_virt_to_phys(data->base);
+			data->size = ipa_get_data_fifo_sz(dir, type);
+		}
+	} else {
+		if (dir == IPA_BRIDGE_DIR_UL) {
+			desc->base = ipa_ctx->smem_pipe_mem +
+				IPA_SMEM_UL_EMB_DESC_FIFO_OFST;
+			desc->phys_base = smem_virt_to_phys(desc->base);
+			desc->size = ipa_get_desc_fifo_sz(dir, type);
+			data->base = ipa_ctx->smem_pipe_mem +
+				IPA_SMEM_UL_EMB_DATA_FIFO_OFST;
+			data->phys_base = smem_virt_to_phys(data->base);
+			data->size = ipa_get_data_fifo_sz(dir, type);
+		} else {
+			ret = sps_setup_bam2bam_fifo(data,
+					IPA_OCIMEM_DL_A2_DATA_FIFO_OFST,
+					ipa_get_data_fifo_sz(dir, type), 1);
+			if (ret) {
+				IPAERR("DAFIFO setup fail %d dir %d type %d\n",
+						ret, dir, type);
+				return ret;
+			}
+
+			ret = sps_setup_bam2bam_fifo(desc,
+					IPA_OCIMEM_DL_A2_DESC_FIFO_OFST,
+					ipa_get_desc_fifo_sz(dir, type), 1);
+			if (ret) {
+				IPAERR("DEFIFO setup fail %d dir %d type %d\n",
+						ret, dir, type);
+				return ret;
+			}
+		}
 	}
-	sys->connection.options =
-	   SPS_O_AUTO_ENABLE | SPS_O_ACK_TRANSFERS | SPS_O_POLL;
-	ret = sps_set_config(sys->pipe, &sys->connection);
-	if (ret) {
-		IPAERR("sps_set_config() failed %d\n", ret);
-		goto fail;
-	}
-	ret = 0;
-fail:
-	return ret;
+
+	IPADBG("dir=%d type=%d Dpa=%x Dsz=%u Dva=%p dpa=%x dsz=%u dva=%p\n",
+			dir, type, data->phys_base, data->size, data->base,
+			desc->phys_base, desc->size, desc->base);
+
+	return 0;
 }
 
-static int queue_rx_single(enum ipa_bridge_dir dir)
+static int setup_dma_bam_bridge(enum ipa_bridge_dir dir,
+			       enum ipa_bridge_type type,
+			       struct ipa_sys_connect_params *props,
+			       u32 *clnt_hdl)
 {
-	struct ipa_bridge_pipe_context *sys_rx = &bridge[2 * dir];
-	struct ipa_pkt_info *info;
+	struct ipa_connect_params ipa_in_params;
+	struct ipa_sps_params sps_out_params;
+	int dma_a2_pipe;
+	int dma_ipa_pipe;
+	struct sps_pipe *pipe;
+	struct sps_pipe *pipe_a2;
+	struct sps_connect _connection;
+	struct sps_connect *connection = &_connection;
+	struct a2_mux_pipe_connection pipe_conn = {0};
+	enum a2_mux_pipe_direction pipe_dir;
+	u32 dma_hdl = sps_dma_get_bam_handle();
+	u32 a2_hdl;
+	u32 pa;
 	int ret;
 
-	info = kmalloc(sizeof(struct ipa_pkt_info), GFP_KERNEL);
-	if (!info) {
-		IPAERR("unable to alloc rx_pkt_info\n");
-		goto fail_pkt;
-	}
+	memset(&ipa_in_params, 0, sizeof(ipa_in_params));
+	memset(&sps_out_params, 0, sizeof(sps_out_params));
 
-	info->buffer = kmalloc(IPA_RX_SKB_SIZE, GFP_KERNEL | GFP_DMA);
-	if (!info->buffer) {
-		IPAERR("unable to alloc rx_pkt_buffer\n");
-		goto fail_buffer;
-	}
+	pipe_dir = (dir == IPA_BRIDGE_DIR_UL) ? IPA_TO_A2 : A2_TO_IPA;
 
-	info->dma_address = dma_map_single(NULL, info->buffer, IPA_RX_SKB_SIZE,
-					   DMA_BIDIRECTIONAL);
-	if (info->dma_address == 0 || info->dma_address == ~0) {
-		IPAERR("dma_map_single failure %p for %p\n",
-				(void *)info->dma_address, info->buffer);
-		goto fail_dma;
-	}
-
-	info->len = ~0;
-
-	list_add_tail(&info->list_node, &sys_rx->head_desc_list);
-	ret = sps_transfer_one(sys_rx->pipe, info->dma_address,
-			       IPA_RX_SKB_SIZE, info,
-			       SPS_IOVEC_FLAG_INT | SPS_IOVEC_FLAG_EOT);
+	ret = ipa_get_a2_mux_pipe_info(pipe_dir, &pipe_conn);
 	if (ret) {
-		list_del(&info->list_node);
-		dma_unmap_single(NULL, info->dma_address, IPA_RX_SKB_SIZE,
-				 DMA_BIDIRECTIONAL);
-		IPAERR("sps_transfer_one failed %d\n", ret);
-		goto fail_dma;
+		IPAERR("ipa_get_a2_mux_pipe_info failed dir=%d type=%d\n",
+				dir, type);
+		goto fail_get_a2_prop;
 	}
-	sys_rx->len++;
+
+	pa = (dir == IPA_BRIDGE_DIR_UL) ? pipe_conn.dst_phy_addr :
+					  pipe_conn.src_phy_addr;
+
+	ret = sps_phy2h(pa, &a2_hdl);
+	if (ret) {
+		IPAERR("sps_phy2h failed (A2 BAM) %d dir=%d type=%d\n",
+				ret, dir, type);
+		goto fail_get_a2_prop;
+	}
+
+	ipa_get_dma_pipe_num(dir, type, &dma_a2_pipe, &dma_ipa_pipe);
+
+	ipa_in_params.ipa_ep_cfg = props->ipa_ep_cfg;
+	ipa_in_params.client = props->client;
+	ipa_in_params.client_bam_hdl = dma_hdl;
+	ipa_in_params.client_ep_idx = dma_ipa_pipe;
+	ipa_in_params.priv = props->priv;
+	ipa_in_params.notify = props->notify;
+	ipa_in_params.desc_fifo_sz = ipa_get_desc_fifo_sz(dir, type);
+	ipa_in_params.data_fifo_sz = ipa_get_data_fifo_sz(dir, type);
+
+	if (type == IPA_BRIDGE_TYPE_EMBEDDED && dir == IPA_BRIDGE_DIR_DL) {
+		if (ipa_setup_ipa_dma_fifos(dir, type, &ipa_in_params.desc,
+					&ipa_in_params.data)) {
+			IPAERR("fail to setup IPA-DMA FIFOs dir=%d type=%d\n",
+					dir, type);
+			goto fail_get_a2_prop;
+		}
+	}
+
+	if (ipa_connect(&ipa_in_params, &sps_out_params, clnt_hdl)) {
+		IPAERR("ipa connect failed dir=%d type=%d\n", dir, type);
+		goto fail_get_a2_prop;
+	}
+
+	pipe = sps_alloc_endpoint();
+	if (pipe == NULL) {
+		IPAERR("sps_alloc_endpoint failed dir=%d type=%d\n", dir, type);
+		ret = -ENOMEM;
+		goto fail_sps_alloc;
+	}
+
+	memset(&_connection, 0, sizeof(_connection));
+	ret = sps_get_config(pipe, connection);
+	if (ret) {
+		IPAERR("sps_get_config failed %d dir=%d type=%d\n", ret, dir,
+				type);
+		goto fail_sps_get_config;
+	}
+
+	if (dir == IPA_BRIDGE_DIR_DL) {
+		connection->mode = SPS_MODE_SRC;
+		connection->source = dma_hdl;
+		connection->destination = sps_out_params.ipa_bam_hdl;
+		connection->src_pipe_index = dma_ipa_pipe;
+		connection->dest_pipe_index = sps_out_params.ipa_ep_idx;
+	} else {
+		connection->mode = SPS_MODE_DEST;
+		connection->source = sps_out_params.ipa_bam_hdl;
+		connection->destination = dma_hdl;
+		connection->src_pipe_index = sps_out_params.ipa_ep_idx;
+		connection->dest_pipe_index = dma_ipa_pipe;
+	}
+
+	connection->event_thresh = IPA_EVENT_THRESHOLD;
+	connection->data = sps_out_params.data;
+	connection->desc = sps_out_params.desc;
+	connection->options = SPS_O_AUTO_ENABLE;
+
+	ret = sps_connect(pipe, connection);
+	if (ret) {
+		IPAERR("sps_connect failed %d dir=%d type=%d\n", ret, dir,
+				type);
+		goto fail_sps_get_config;
+	}
+
+	if (dir == IPA_BRIDGE_DIR_DL) {
+		bridge[type].pipe[IPA_DL_TO_IPA].pipe = pipe;
+		bridge[type].pipe[IPA_DL_TO_IPA].ipa_facing = true;
+		bridge[type].pipe[IPA_DL_TO_IPA].valid = true;
+	} else {
+		bridge[type].pipe[IPA_UL_FROM_IPA].pipe = pipe;
+		bridge[type].pipe[IPA_UL_FROM_IPA].ipa_facing = true;
+		bridge[type].pipe[IPA_UL_FROM_IPA].valid = true;
+	}
+
+	IPADBG("dir=%d type=%d (ipa) src(0x%x:%u)->dst(0x%x:%u)\n", dir, type,
+			connection->source, connection->src_pipe_index,
+			connection->destination, connection->dest_pipe_index);
+
+	pipe_a2 = sps_alloc_endpoint();
+	if (pipe_a2 == NULL) {
+		IPAERR("sps_alloc_endpoint failed2 dir=%d type=%d\n", dir,
+				type);
+		ret = -ENOMEM;
+		goto fail_sps_alloc_a2;
+	}
+
+	memset(&_connection, 0, sizeof(_connection));
+	ret = sps_get_config(pipe_a2, connection);
+	if (ret) {
+		IPAERR("sps_get_config failed2 %d dir=%d type=%d\n", ret, dir,
+				type);
+		goto fail_sps_get_config_a2;
+	}
+
+	if (dir == IPA_BRIDGE_DIR_DL) {
+		connection->mode = SPS_MODE_DEST;
+		connection->source = a2_hdl;
+		connection->destination = dma_hdl;
+		connection->src_pipe_index = ipa_get_a2_pipe_num(dir, type);
+		connection->dest_pipe_index = dma_a2_pipe;
+	} else {
+		connection->mode = SPS_MODE_SRC;
+		connection->source = dma_hdl;
+		connection->destination = a2_hdl;
+		connection->src_pipe_index = dma_a2_pipe;
+		connection->dest_pipe_index = ipa_get_a2_pipe_num(dir, type);
+	}
+
+	connection->event_thresh = IPA_EVENT_THRESHOLD;
+
+	if (ipa_setup_a2_dma_fifos(dir, type, &connection->desc,
+				&connection->data)) {
+		IPAERR("fail to setup A2-DMA FIFOs dir=%d type=%d\n",
+				dir, type);
+		goto fail_sps_get_config_a2;
+	}
+
+	connection->options = SPS_O_AUTO_ENABLE;
+
+	ret = sps_connect(pipe_a2, connection);
+	if (ret) {
+		IPAERR("sps_connect failed2 %d dir=%d type=%d\n", ret, dir,
+				type);
+		goto fail_sps_get_config_a2;
+	}
+
+	if (dir == IPA_BRIDGE_DIR_DL) {
+		bridge[type].pipe[IPA_DL_FROM_A2].pipe = pipe_a2;
+		bridge[type].pipe[IPA_DL_FROM_A2].valid = true;
+	} else {
+		bridge[type].pipe[IPA_UL_TO_A2].pipe = pipe_a2;
+		bridge[type].pipe[IPA_UL_TO_A2].valid = true;
+	}
+
+	IPADBG("dir=%d type=%d (a2) src(0x%x:%u)->dst(0x%x:%u)\n", dir, type,
+			connection->source, connection->src_pipe_index,
+			connection->destination, connection->dest_pipe_index);
+
 	return 0;
 
-fail_dma:
-	kfree(info->buffer);
-fail_buffer:
-	kfree(info);
-fail_pkt:
-	IPAERR("failed\n");
-	return -ENOMEM;
-}
-
-static int ipa_reclaim_tx(struct ipa_bridge_pipe_context *sys_tx, bool all)
-{
-	struct sps_iovec iov;
-	struct ipa_pkt_info *tx_pkt;
-	int cnt = 0;
-	int ret;
-
-	do {
-		iov.addr = 0;
-		ret = sps_get_iovec(sys_tx->pipe, &iov);
-		if (ret || iov.addr == 0) {
-			break;
-		} else {
-			tx_pkt = list_first_entry(&sys_tx->head_desc_list,
-						  struct ipa_pkt_info,
-						  list_node);
-			list_move_tail(&tx_pkt->list_node,
-					&sys_tx->free_desc_list);
-			sys_tx->len--;
-			sys_tx->free_len++;
-			tx_pkt->len = ~0;
-			cnt++;
-		}
-	} while (all);
-
-	return cnt;
-}
-
-static void ipa_do_bridge_work(enum ipa_bridge_dir dir)
-{
-	struct ipa_bridge_pipe_context *sys_rx = &bridge[2 * dir];
-	struct ipa_bridge_pipe_context *sys_tx = &bridge[2 * dir + 1];
-	struct ipa_pkt_info *tx_pkt;
-	struct ipa_pkt_info *rx_pkt;
-	struct ipa_pkt_info *tmp_pkt;
-	struct sps_iovec iov;
-	int ret;
-	int inactive_cycles = 0;
-
-	while (1) {
-		++inactive_cycles;
-
-		if (ipa_reclaim_tx(sys_tx, false))
-			inactive_cycles = 0;
-
-		iov.addr = 0;
-		ret = sps_get_iovec(sys_rx->pipe, &iov);
-		if (ret || iov.addr == 0) {
-			/* no-op */
-		} else {
-			inactive_cycles = 0;
-
-			rx_pkt = list_first_entry(&sys_rx->head_desc_list,
-						  struct ipa_pkt_info,
-						  list_node);
-			list_del(&rx_pkt->list_node);
-			sys_rx->len--;
-			rx_pkt->len = iov.size;
-
-retry_alloc_tx:
-			if (list_empty(&sys_tx->free_desc_list)) {
-				tmp_pkt = kmalloc(sizeof(struct ipa_pkt_info),
-						GFP_KERNEL);
-				if (!tmp_pkt) {
-					pr_debug_ratelimited("%s: unable to alloc tx_pkt_info\n",
-					       __func__);
-					usleep_range(polling_min_sleep[dir],
-							polling_max_sleep[dir]);
-					goto retry_alloc_tx;
-				}
-
-				tmp_pkt->buffer = kmalloc(IPA_RX_SKB_SIZE,
-						GFP_KERNEL | GFP_DMA);
-				if (!tmp_pkt->buffer) {
-					pr_debug_ratelimited("%s: unable to alloc tx_pkt_buffer\n",
-					       __func__);
-					kfree(tmp_pkt);
-					usleep_range(polling_min_sleep[dir],
-							polling_max_sleep[dir]);
-					goto retry_alloc_tx;
-				}
-
-				tmp_pkt->dma_address = dma_map_single(NULL,
-						tmp_pkt->buffer,
-						IPA_RX_SKB_SIZE,
-						DMA_BIDIRECTIONAL);
-				if (tmp_pkt->dma_address == 0 ||
-						tmp_pkt->dma_address == ~0) {
-					pr_debug_ratelimited("%s: dma_map_single failure %p for %p\n",
-					       __func__,
-					       (void *)tmp_pkt->dma_address,
-					       tmp_pkt->buffer);
-				}
-
-				list_add_tail(&tmp_pkt->list_node,
-						&sys_tx->free_desc_list);
-				sys_tx->free_len++;
-				alloc_cnt[dir]++;
-
-				tmp_pkt->len = ~0;
-			}
-
-			tx_pkt = list_first_entry(&sys_tx->free_desc_list,
-						  struct ipa_pkt_info,
-						  list_node);
-			list_del(&tx_pkt->list_node);
-			sys_tx->free_len--;
-
-retry_add_rx:
-			list_add_tail(&tx_pkt->list_node,
-					&sys_rx->head_desc_list);
-			ret = sps_transfer_one(sys_rx->pipe,
-					tx_pkt->dma_address,
-					IPA_RX_SKB_SIZE,
-					tx_pkt,
-					SPS_IOVEC_FLAG_INT |
-					SPS_IOVEC_FLAG_EOT);
-			if (ret) {
-				list_del(&tx_pkt->list_node);
-				pr_debug_ratelimited("%s: sps_transfer_one failed %d\n",
-						__func__, ret);
-				usleep_range(polling_min_sleep[dir],
-						polling_max_sleep[dir]);
-				goto retry_add_rx;
-			}
-			sys_rx->len++;
-
-retry_add_tx:
-			list_add_tail(&rx_pkt->list_node,
-					&sys_tx->head_desc_list);
-			ret = sps_transfer_one(sys_tx->pipe,
-					       rx_pkt->dma_address,
-					       iov.size,
-					       rx_pkt,
-					       SPS_IOVEC_FLAG_INT |
-					       SPS_IOVEC_FLAG_EOT);
-			if (ret) {
-				pr_debug_ratelimited("%s: fail to add to TX dir=%d\n",
-						__func__, dir);
-				list_del(&rx_pkt->list_node);
-				ipa_reclaim_tx(sys_tx, true);
-				usleep_range(polling_min_sleep[dir],
-						polling_max_sleep[dir]);
-				goto retry_add_tx;
-			}
-			sys_tx->len++;
-		}
-
-		if (inactive_cycles >= polling_inactivity[dir]) {
-			ipa_switch_to_intr_mode(dir);
-			break;
-		}
-	}
-}
-
-static void ipa_sps_irq_rx_notify(struct sps_event_notify *notify)
-{
-	switch (notify->event_id) {
-	case SPS_EVENT_EOT:
-		ipa_switch_to_poll_mode(IPA_UL);
-		queue_work(ipa_ul_workqueue, &ul_work);
-		break;
-	default:
-		IPAERR("recieved unexpected event id %d\n", notify->event_id);
-	}
-}
-
-static int setup_bridge_to_ipa(enum ipa_bridge_dir dir)
-{
-	struct ipa_bridge_pipe_context *sys;
-	struct ipa_ep_cfg_mode mode;
-	dma_addr_t dma_addr;
-	int ipa_ep_idx;
-	int ret;
-	int i;
-
-	if (dir == IPA_DL) {
-		ipa_ep_idx = ipa_get_ep_mapping(ipa_ctx->mode,
-				IPA_CLIENT_A2_TETHERED_PROD);
-		if (ipa_ep_idx == -1) {
-			IPAERR("Invalid client.\n");
-			ret = -EINVAL;
-			goto tx_alloc_endpoint_failed;
-		}
-
-		sys = &bridge[IPA_DL_TO_IPA];
-		sys->pipe = sps_alloc_endpoint();
-		if (sys->pipe == NULL) {
-			IPAERR("tx alloc endpoint failed\n");
-			ret = -ENOMEM;
-			goto tx_alloc_endpoint_failed;
-		}
-		ret = sps_get_config(sys->pipe, &sys->connection);
-		if (ret) {
-			IPAERR("tx get config failed %d\n", ret);
-			goto tx_get_config_failed;
-		}
-
-		sys->connection.source = SPS_DEV_HANDLE_MEM;
-		sys->connection.src_pipe_index = ipa_ctx->a5_pipe_index++;
-		sys->connection.destination = ipa_ctx->bam_handle;
-		sys->connection.dest_pipe_index = ipa_ep_idx;
-		sys->connection.mode = SPS_MODE_DEST;
-		sys->connection.options =
-		   SPS_O_AUTO_ENABLE | SPS_O_ACK_TRANSFERS | SPS_O_POLL;
-		sys->desc_mem_buf.size = IPA_SYS_DESC_FIFO_SZ; /* 2k */
-		sys->desc_mem_buf.base = dma_alloc_coherent(NULL,
-				sys->desc_mem_buf.size,
-				&dma_addr,
-				0);
-		if (sys->desc_mem_buf.base == NULL) {
-			IPAERR("tx memory alloc failed\n");
-			ret = -ENOMEM;
-			goto tx_get_config_failed;
-		}
-		sys->desc_mem_buf.phys_base = dma_addr;
-		memset(sys->desc_mem_buf.base, 0x0, sys->desc_mem_buf.size);
-		sys->connection.desc = sys->desc_mem_buf;
-		sys->connection.event_thresh = IPA_EVENT_THRESHOLD;
-
-		ret = sps_connect(sys->pipe, &sys->connection);
-		if (ret < 0) {
-			IPAERR("tx connect error %d\n", ret);
-			goto tx_connect_failed;
-		}
-
-		INIT_LIST_HEAD(&sys->head_desc_list);
-		INIT_LIST_HEAD(&sys->free_desc_list);
-		spin_lock_init(&sys->spinlock);
-
-		ipa_ctx->ep[ipa_ep_idx].valid = 1;
-
-		mode.mode = IPA_DMA;
-		mode.dst = IPA_CLIENT_USB_CONS;
-		ret = ipa_cfg_ep_mode(ipa_ep_idx, &mode);
-		if (ret < 0) {
-			IPAERR("DMA mode set error %d\n", ret);
-			goto tx_mode_set_failed;
-		}
-
-		return 0;
-
-tx_mode_set_failed:
-		sps_disconnect(sys->pipe);
-tx_connect_failed:
-		dma_free_coherent(NULL, sys->desc_mem_buf.size,
-				sys->desc_mem_buf.base,
-				sys->desc_mem_buf.phys_base);
-tx_get_config_failed:
-		sps_free_endpoint(sys->pipe);
-tx_alloc_endpoint_failed:
-		return ret;
-	} else {
-
-		ipa_ep_idx = ipa_get_ep_mapping(ipa_ctx->mode,
-				IPA_CLIENT_A2_TETHERED_CONS);
-		if (ipa_ep_idx == -1) {
-			IPAERR("Invalid client.\n");
-			ret = -EINVAL;
-			goto rx_alloc_endpoint_failed;
-		}
-
-		sys = &bridge[IPA_UL_FROM_IPA];
-		sys->pipe = sps_alloc_endpoint();
-		if (sys->pipe == NULL) {
-			IPAERR("rx alloc endpoint failed\n");
-			ret = -ENOMEM;
-			goto rx_alloc_endpoint_failed;
-		}
-		ret = sps_get_config(sys->pipe, &sys->connection);
-		if (ret) {
-			IPAERR("rx get config failed %d\n", ret);
-			goto rx_get_config_failed;
-		}
-
-		sys->connection.source = ipa_ctx->bam_handle;
-		sys->connection.src_pipe_index = 7;
-		sys->connection.destination = SPS_DEV_HANDLE_MEM;
-		sys->connection.dest_pipe_index = ipa_ctx->a5_pipe_index++;
-		sys->connection.mode = SPS_MODE_SRC;
-		sys->connection.options = SPS_O_AUTO_ENABLE | SPS_O_EOT |
-		      SPS_O_ACK_TRANSFERS;
-		sys->desc_mem_buf.size = IPA_SYS_DESC_FIFO_SZ; /* 2k */
-		sys->desc_mem_buf.base = dma_alloc_coherent(NULL,
-				sys->desc_mem_buf.size,
-				&dma_addr,
-				0);
-		if (sys->desc_mem_buf.base == NULL) {
-			IPAERR("rx memory alloc failed\n");
-			ret = -ENOMEM;
-			goto rx_get_config_failed;
-		}
-		sys->desc_mem_buf.phys_base = dma_addr;
-		memset(sys->desc_mem_buf.base, 0x0, sys->desc_mem_buf.size);
-		sys->connection.desc = sys->desc_mem_buf;
-		sys->connection.event_thresh = IPA_EVENT_THRESHOLD;
-
-		ret = sps_connect(sys->pipe, &sys->connection);
-		if (ret < 0) {
-			IPAERR("rx connect error %d\n", ret);
-			goto rx_connect_failed;
-		}
-
-		sys->register_event.options = SPS_O_EOT;
-		sys->register_event.mode = SPS_TRIGGER_CALLBACK;
-		sys->register_event.xfer_done = NULL;
-		sys->register_event.callback = ipa_sps_irq_rx_notify;
-		sys->register_event.user = NULL;
-		ret = sps_register_event(sys->pipe, &sys->register_event);
-		if (ret < 0) {
-			IPAERR("tx register event error %d\n", ret);
-			goto rx_event_reg_failed;
-		}
-
-		INIT_LIST_HEAD(&sys->head_desc_list);
-		INIT_LIST_HEAD(&sys->free_desc_list);
-		spin_lock_init(&sys->spinlock);
-
-		for (i = 0; i < IPA_RX_POOL_CEIL; i++) {
-			ret = queue_rx_single(dir);
-			if (ret < 0)
-				IPAERR("queue fail %d %d\n", dir, i);
-		}
-
-		return 0;
-
-rx_event_reg_failed:
-		sps_disconnect(sys->pipe);
-rx_connect_failed:
-		dma_free_coherent(NULL,
-				sys->desc_mem_buf.size,
-				sys->desc_mem_buf.base,
-				sys->desc_mem_buf.phys_base);
-rx_get_config_failed:
-		sps_free_endpoint(sys->pipe);
-rx_alloc_endpoint_failed:
-		return ret;
-	}
-}
-
-static void bam_mux_rx_notify(struct sps_event_notify *notify)
-{
-	switch (notify->event_id) {
-	case SPS_EVENT_EOT:
-		ipa_switch_to_poll_mode(IPA_DL);
-		queue_work(ipa_dl_workqueue, &dl_work);
-		break;
-	default:
-		IPAERR("recieved unexpected event id %d\n", notify->event_id);
-	}
-}
-
-static int setup_bridge_to_a2(enum ipa_bridge_dir dir)
-{
-	struct ipa_bridge_pipe_context *sys;
-	struct a2_mux_pipe_connection pipe_conn = { 0, };
-	dma_addr_t dma_addr;
-	u32 a2_handle;
-	int ret;
-	int i;
-
-	if (dir == IPA_UL) {
-		ret = ipa_get_a2_mux_pipe_info(IPA_TO_A2, &pipe_conn);
-		if (ret) {
-			IPAERR("ipa_get_a2_mux_pipe_info failed IPA_TO_A2\n");
-			goto tx_alloc_endpoint_failed;
-		}
-
-		ret = sps_phy2h(pipe_conn.dst_phy_addr, &a2_handle);
-		if (ret) {
-			IPAERR("sps_phy2h failed (A2 BAM) %d\n", ret);
-			goto tx_alloc_endpoint_failed;
-		}
-
-		sys = &bridge[IPA_UL_TO_A2];
-		sys->pipe = sps_alloc_endpoint();
-		if (sys->pipe == NULL) {
-			IPAERR("tx alloc endpoint failed\n");
-			ret = -ENOMEM;
-			goto tx_alloc_endpoint_failed;
-		}
-		ret = sps_get_config(sys->pipe, &sys->connection);
-		if (ret) {
-			IPAERR("tx get config failed %d\n", ret);
-			goto tx_get_config_failed;
-		}
-
-		sys->connection.source = SPS_DEV_HANDLE_MEM;
-		sys->connection.src_pipe_index = ipa_ctx->a5_pipe_index++;
-		sys->connection.destination = a2_handle;
-		sys->connection.dest_pipe_index = pipe_conn.dst_pipe_index;
-		sys->connection.mode = SPS_MODE_DEST;
-		sys->connection.options =
-		   SPS_O_AUTO_ENABLE | SPS_O_ACK_TRANSFERS | SPS_O_POLL;
-		sys->desc_mem_buf.size = IPA_SYS_DESC_FIFO_SZ; /* 2k */
-		sys->desc_mem_buf.base = dma_alloc_coherent(NULL,
-				sys->desc_mem_buf.size,
-				&dma_addr,
-				0);
-		if (sys->desc_mem_buf.base == NULL) {
-			IPAERR("tx memory alloc failed\n");
-			ret = -ENOMEM;
-			goto tx_get_config_failed;
-		}
-		sys->desc_mem_buf.phys_base = dma_addr;
-		memset(sys->desc_mem_buf.base, 0x0, sys->desc_mem_buf.size);
-		sys->connection.desc = sys->desc_mem_buf;
-		sys->connection.event_thresh = IPA_EVENT_THRESHOLD;
-
-		ret = sps_connect(sys->pipe, &sys->connection);
-		if (ret < 0) {
-			IPAERR("tx connect error %d\n", ret);
-			goto tx_connect_failed;
-		}
-
-		INIT_LIST_HEAD(&sys->head_desc_list);
-		INIT_LIST_HEAD(&sys->free_desc_list);
-		spin_lock_init(&sys->spinlock);
-
-		return 0;
-
-tx_connect_failed:
-		dma_free_coherent(NULL,
-				sys->desc_mem_buf.size,
-				sys->desc_mem_buf.base,
-				sys->desc_mem_buf.phys_base);
-tx_get_config_failed:
-		sps_free_endpoint(sys->pipe);
-tx_alloc_endpoint_failed:
-		return ret;
-	} else { /* dir == IPA_UL */
-
-		ret = ipa_get_a2_mux_pipe_info(A2_TO_IPA, &pipe_conn);
-		if (ret) {
-			IPAERR("ipa_get_a2_mux_pipe_info failed A2_TO_IPA\n");
-			goto rx_alloc_endpoint_failed;
-		}
-
-		ret = sps_phy2h(pipe_conn.src_phy_addr, &a2_handle);
-		if (ret) {
-			IPAERR("sps_phy2h failed (A2 BAM) %d\n", ret);
-			goto rx_alloc_endpoint_failed;
-		}
-
-		sys = &bridge[IPA_DL_FROM_A2];
-		sys->pipe = sps_alloc_endpoint();
-		if (sys->pipe == NULL) {
-			IPAERR("rx alloc endpoint failed\n");
-			ret = -ENOMEM;
-			goto rx_alloc_endpoint_failed;
-		}
-		ret = sps_get_config(sys->pipe, &sys->connection);
-		if (ret) {
-			IPAERR("rx get config failed %d\n", ret);
-			goto rx_get_config_failed;
-		}
-
-		sys->connection.source = a2_handle;
-		sys->connection.src_pipe_index = pipe_conn.src_pipe_index;
-		sys->connection.destination = SPS_DEV_HANDLE_MEM;
-		sys->connection.dest_pipe_index = ipa_ctx->a5_pipe_index++;
-		sys->connection.mode = SPS_MODE_SRC;
-		sys->connection.options = SPS_O_AUTO_ENABLE | SPS_O_EOT |
-		      SPS_O_ACK_TRANSFERS;
-		sys->desc_mem_buf.size = IPA_SYS_DESC_FIFO_SZ; /* 2k */
-		sys->desc_mem_buf.base = dma_alloc_coherent(NULL,
-				sys->desc_mem_buf.size,
-				&dma_addr,
-				0);
-		if (sys->desc_mem_buf.base == NULL) {
-			IPAERR("rx memory alloc failed\n");
-			ret = -ENOMEM;
-			goto rx_get_config_failed;
-		}
-		sys->desc_mem_buf.phys_base = dma_addr;
-		memset(sys->desc_mem_buf.base, 0x0, sys->desc_mem_buf.size);
-		sys->connection.desc = sys->desc_mem_buf;
-		sys->connection.event_thresh = IPA_EVENT_THRESHOLD;
-
-		ret = sps_connect(sys->pipe, &sys->connection);
-		if (ret < 0) {
-			IPAERR("rx connect error %d\n", ret);
-			goto rx_connect_failed;
-		}
-
-		sys->register_event.options = SPS_O_EOT;
-		sys->register_event.mode = SPS_TRIGGER_CALLBACK;
-		sys->register_event.xfer_done = NULL;
-		sys->register_event.callback = bam_mux_rx_notify;
-		sys->register_event.user = NULL;
-		ret = sps_register_event(sys->pipe, &sys->register_event);
-		if (ret < 0) {
-			IPAERR("tx register event error %d\n", ret);
-			goto rx_event_reg_failed;
-		}
-
-		INIT_LIST_HEAD(&sys->head_desc_list);
-		INIT_LIST_HEAD(&sys->free_desc_list);
-		spin_lock_init(&sys->spinlock);
-
-
-		for (i = 0; i < IPA_RX_POOL_CEIL; i++) {
-			ret = queue_rx_single(dir);
-			if (ret < 0)
-				IPAERR("queue fail %d %d\n", dir, i);
-		}
-
-		return 0;
-
-rx_event_reg_failed:
-		sps_disconnect(sys->pipe);
-rx_connect_failed:
-		dma_free_coherent(NULL,
-				sys->desc_mem_buf.size,
-				sys->desc_mem_buf.base,
-				sys->desc_mem_buf.phys_base);
-rx_get_config_failed:
-		sps_free_endpoint(sys->pipe);
-rx_alloc_endpoint_failed:
-		return ret;
-	}
+fail_sps_get_config_a2:
+	sps_free_endpoint(pipe_a2);
+fail_sps_alloc_a2:
+	sps_disconnect(pipe);
+fail_sps_get_config:
+	sps_free_endpoint(pipe);
+fail_sps_alloc:
+	ipa_disconnect(*clnt_hdl);
+fail_get_a2_prop:
+	return ret;
 }
 
 /**
- * ipa_bridge_init() - initialize the tethered bridge, allocate UL and DL
- * workqueues
+ * ipa_bridge_init()
  *
  * Return codes: 0: success, -ENOMEM: failure
  */
 int ipa_bridge_init(void)
 {
-	int ret;
+	int i;
 
-	ipa_ul_workqueue = alloc_workqueue("ipa_ul",
-			WQ_MEM_RECLAIM | WQ_CPU_INTENSIVE, 1);
-	if (!ipa_ul_workqueue) {
-		IPAERR("ipa ul wq alloc failed\n");
-		ret = -ENOMEM;
-		goto fail_ul;
+	ipa_ctx->smem_pipe_mem = smem_alloc(SMEM_BAM_PIPE_MEMORY,
+			IPA_SMEM_PIPE_MEM_SZ);
+	if (!ipa_ctx->smem_pipe_mem) {
+		IPAERR("smem alloc failed\n");
+		return -ENOMEM;
 	}
+	IPADBG("smem_pipe_mem = %p\n", ipa_ctx->smem_pipe_mem);
 
-	ipa_dl_workqueue = alloc_workqueue("ipa_dl",
-			WQ_MEM_RECLAIM | WQ_CPU_INTENSIVE, 1);
-	if (!ipa_dl_workqueue) {
-		IPAERR("ipa dl wq alloc failed\n");
-		ret = -ENOMEM;
-		goto fail_dl;
-	}
+	for (i = 0; i < IPA_BRIDGE_TYPE_MAX; i++)
+		bridge[i].type = i;
 
 	return 0;
-fail_dl:
-	destroy_workqueue(ipa_ul_workqueue);
-fail_ul:
-	return ret;
 }
 
 /**
- * ipa_bridge_setup() - setup tethered SW bridge in specified direction
+ * ipa_bridge_setup() - setup SW bridge leg
  * @dir: downlink or uplink (from air interface perspective)
+ * @type: tethered or embedded bridge
+ * @props: bridge leg properties (EP config, callbacks, etc)
+ * @clnt_hdl: [out] handle of IPA EP belonging to bridge leg
+ *
+ * NOTE: IT IS CALLER'S RESPONSIBILITY TO ENSURE BAMs ARE
+ * OPERATIONAL AS LONG AS BRIDGE REMAINS UP
  *
  * Return codes:
  * 0: success
  * various negative error codes on errors
  */
-int ipa_bridge_setup(enum ipa_bridge_dir dir)
+int ipa_bridge_setup(enum ipa_bridge_dir dir, enum ipa_bridge_type type,
+		     struct ipa_sys_connect_params *props, u32 *clnt_hdl)
 {
 	int ret;
 
-	if (atomic_inc_return(&ipa_ctx->ipa_active_clients) == 1)
-		ipa_enable_clks();
-
-	if (setup_bridge_to_a2(dir)) {
-		IPAERR("fail to setup SYS pipe to A2 %d\n", dir);
-		ret = -EINVAL;
-		goto bail_a2;
+	if (props == NULL || clnt_hdl == NULL ||
+	    type >= IPA_BRIDGE_TYPE_MAX || dir >= IPA_BRIDGE_DIR_MAX ||
+	    props->client >= IPA_CLIENT_MAX) {
+		IPAERR("Bad param props=%p clnt_hdl=%p type=%d dir=%d\n",
+		       props, clnt_hdl, type, dir);
+		return -EINVAL;
 	}
 
-	if (setup_bridge_to_ipa(dir)) {
-		IPAERR("fail to setup SYS pipe to IPA %d\n", dir);
+	ipa_inc_client_enable_clks();
+
+	if (setup_dma_bam_bridge(dir, type, props, clnt_hdl)) {
+		IPAERR("fail to setup SYS pipe to IPA dir=%d type=%d\n",
+		       dir, type);
 		ret = -EINVAL;
 		goto bail_ipa;
 	}
@@ -753,53 +521,57 @@ int ipa_bridge_setup(enum ipa_bridge_dir dir)
 	return 0;
 
 bail_ipa:
-	if (dir == IPA_UL)
-		sps_disconnect(bridge[IPA_UL_TO_A2].pipe);
-	else
-		sps_disconnect(bridge[IPA_DL_FROM_A2].pipe);
-bail_a2:
-	if (atomic_dec_return(&ipa_ctx->ipa_active_clients) == 0)
-		ipa_disable_clks();
+	ipa_dec_client_disable_clks();
 	return ret;
 }
+EXPORT_SYMBOL(ipa_bridge_setup);
 
 /**
- * ipa_bridge_teardown() - teardown the tethered bridge in the specified dir
+ * ipa_bridge_teardown() - teardown SW bridge leg
  * @dir: downlink or uplink (from air interface perspective)
+ * @type: tethered or embedded bridge
+ * @clnt_hdl: handle of IPA EP
  *
  * Return codes:
- * 0: always
+ * 0: success
+ * various negative error codes on errors
  */
-int ipa_bridge_teardown(enum ipa_bridge_dir dir)
+int ipa_bridge_teardown(enum ipa_bridge_dir dir, enum ipa_bridge_type type,
+			u32 clnt_hdl)
 {
 	struct ipa_bridge_pipe_context *sys;
+	int lo;
+	int hi;
 
-	if (dir == IPA_UL) {
-		sys = &bridge[IPA_UL_TO_A2];
-		sps_disconnect(sys->pipe);
-		sys = &bridge[IPA_UL_FROM_IPA];
-		sps_disconnect(sys->pipe);
-	} else {
-		sys = &bridge[IPA_DL_FROM_A2];
-		sps_disconnect(sys->pipe);
-		sys = &bridge[IPA_DL_TO_IPA];
-		sps_disconnect(sys->pipe);
+	if (dir >= IPA_BRIDGE_DIR_MAX || type >= IPA_BRIDGE_TYPE_MAX ||
+	    clnt_hdl >= IPA_NUM_PIPES || ipa_ctx->ep[clnt_hdl].valid == 0) {
+		IPAERR("Bad param dir=%d type=%d\n", dir, type);
+		return -EINVAL;
 	}
 
-	if (atomic_dec_return(&ipa_ctx->ipa_active_clients) == 0)
-		ipa_disable_clks();
+	if (dir == IPA_BRIDGE_DIR_UL) {
+		lo = IPA_UL_FROM_IPA;
+		hi = IPA_UL_TO_A2;
+	} else {
+		lo = IPA_DL_FROM_A2;
+		hi = IPA_DL_TO_IPA;
+	}
+
+	for (; lo <= hi; lo++) {
+		sys = &bridge[type].pipe[lo];
+		if (sys->valid) {
+			if (sys->ipa_facing)
+				ipa_disconnect(clnt_hdl);
+			sps_disconnect(sys->pipe);
+			sps_free_endpoint(sys->pipe);
+			sys->valid = false;
+		}
+	}
+
+	memset(&ipa_ctx->ep[clnt_hdl], 0, sizeof(struct ipa_ep_context));
+
+	ipa_dec_client_disable_clks();
 
 	return 0;
 }
-
-/**
- * ipa_bridge_cleanup() - de-initialize the tethered bridge
- *
- * Return codes:
- * None
- */
-void ipa_bridge_cleanup(void)
-{
-	destroy_workqueue(ipa_dl_workqueue);
-	destroy_workqueue(ipa_ul_workqueue);
-}
+EXPORT_SYMBOL(ipa_bridge_teardown);

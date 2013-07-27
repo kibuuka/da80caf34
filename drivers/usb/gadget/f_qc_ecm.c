@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2003-2005,2008 David Brownell
  * Copyright (C) 2008 Nokia Corporation
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,6 +21,11 @@
 
 /* #define VERBOSE_DEBUG */
 
+#ifdef pr_fmt
+#undef pr_fmt
+#endif
+#define pr_fmt(fmt) "%s: " fmt, __func__
+
 #include <linux/slab.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
@@ -28,6 +33,9 @@
 
 #include "u_ether.h"
 #include "u_qc_ether.h"
+
+#include "u_bam_data.h"
+#include <mach/ecm_ipa.h>
 
 
 /*
@@ -58,16 +66,19 @@ enum ecm_qc_notify_state {
 };
 
 struct f_ecm_qc {
-	struct qc_gether			port;
+	struct qc_gether		port;
 	u8				ctrl_id, data_id;
-
+	enum transport_type		xport;
 	char				ethaddr[14];
 
 	struct usb_ep			*notify;
 	struct usb_request		*notify_req;
 	u8				notify_state;
 	bool				is_open;
+	struct data_port		bam_port;
 };
+
+static struct ecm_ipa_params ipa_params;
 
 static inline struct f_ecm_qc *func_to_ecm_qc(struct usb_function *f)
 {
@@ -101,8 +112,9 @@ static inline unsigned ecm_qc_bitrate(struct usb_gadget *g)
 #define ECM_QC_LOG2_STATUS_INTERVAL_MSEC	5	/* 1 << 5 == 32 msec */
 #define ECM_QC_STATUS_BYTECOUNT		16	/* 8 byte header + data */
 
-/* currently only one std ecm instance is supported */
+/* Currently only one std ecm instance is supported - port index 0. */
 #define ECM_QC_NO_PORTS						1
+#define ECM_QC_ACTIVE_PORT					0
 
 /* interface descriptor: */
 
@@ -286,53 +298,6 @@ static struct usb_gadget_strings *ecm_qc_strings[] = {
 	NULL,
 };
 
-static struct data_port ecm_qc_bam_port;
-
-static int ecm_qc_bam_setup(void)
-{
-	int ret;
-
-	ret = bam_data_setup(ECM_QC_NO_PORTS);
-	if (ret) {
-		pr_err("bam_data_setup failed err: %d\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int ecm_qc_bam_connect(struct f_ecm_qc *dev)
-{
-	int ret;
-
-	ecm_qc_bam_port.cdev = dev->port.func.config->cdev;
-	ecm_qc_bam_port.in = dev->port.in_ep;
-	ecm_qc_bam_port.out = dev->port.out_ep;
-
-	/* currently we use the first connection */
-	ret = bam_data_connect(&ecm_qc_bam_port, 0, 0);
-	if (ret) {
-		pr_err("bam_data_connect failed: err:%d\n",
-				ret);
-		return ret;
-	} else {
-		pr_info("ecm bam connected\n");
-	}
-
-	return 0;
-}
-
-static int ecm_qc_bam_disconnect(struct f_ecm_qc *dev)
-{
-	pr_debug("dev:%p. %s Disconnect BAM.\n", dev, __func__);
-
-	bam_data_disconnect(&ecm_qc_bam_port, 0);
-
-	return 0;
-}
-
-/*-------------------------------------------------------------------------*/
-
 static void ecm_qc_do_notify(struct f_ecm_qc *ecm)
 {
 	struct usb_request		*req = ecm->notify_req;
@@ -400,6 +365,85 @@ static void ecm_qc_notify(struct f_ecm_qc *ecm)
 	ecm->notify_state = ECM_QC_NOTIFY_CONNECT;
 	ecm_qc_do_notify(ecm);
 }
+
+static int ecm_qc_bam_setup(void)
+{
+	int ret;
+
+	ret = bam_data_setup(ECM_QC_NO_PORTS);
+	if (ret) {
+		pr_err("bam_data_setup failed err: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int ecm_qc_bam_connect(struct f_ecm_qc *dev)
+{
+	int ret;
+	u8 src_connection_idx, dst_connection_idx;
+	struct usb_composite_dev *cdev = dev->port.func.config->cdev;
+	struct usb_gadget *gadget = cdev->gadget;
+	enum peer_bam peer_bam = (dev->xport == USB_GADGET_XPORT_BAM2BAM_IPA) ?
+		IPA_P_BAM : A2_P_BAM;
+
+	dev->bam_port.cdev = cdev;
+	dev->bam_port.func = &dev->port.func;
+	dev->bam_port.in = dev->port.in_ep;
+	dev->bam_port.out = dev->port.out_ep;
+
+	/* currently we use the first connection */
+	src_connection_idx = usb_bam_get_connection_idx(gadget->name, peer_bam,
+		USB_TO_PEER_PERIPHERAL, 0);
+	dst_connection_idx = usb_bam_get_connection_idx(gadget->name, peer_bam,
+		PEER_PERIPHERAL_TO_USB, 0);
+	if (src_connection_idx < 0 || dst_connection_idx < 0) {
+		pr_err("%s: usb_bam_get_connection_idx failed\n", __func__);
+		return ret;
+	}
+	ret = bam_data_connect(&dev->bam_port, 0, dev->xport,
+		src_connection_idx, dst_connection_idx, USB_FUNC_ECM);
+	if (ret) {
+		pr_err("bam_data_connect failed: err:%d\n", ret);
+		return ret;
+	} else {
+		pr_debug("ecm bam connected\n");
+	}
+
+	dev->is_open = true;
+	ecm_qc_notify(dev);
+
+	return 0;
+}
+
+static int ecm_qc_bam_disconnect(struct f_ecm_qc *dev)
+{
+	pr_debug("dev:%p. Disconnect BAM.\n", dev);
+
+	bam_data_disconnect(&dev->bam_port, 0);
+
+	return 0;
+}
+
+void *ecm_qc_get_ipa_rx_cb(void)
+{
+	return ipa_params.ecm_ipa_rx_dp_notify;
+}
+
+void *ecm_qc_get_ipa_tx_cb(void)
+{
+	return ipa_params.ecm_ipa_tx_dp_notify;
+}
+
+void *ecm_qc_get_ipa_priv(void)
+{
+	return ipa_params.private;
+}
+
+/*-------------------------------------------------------------------------*/
+
+
 
 static void ecm_qc_notify_complete(struct usb_ep *ep, struct usb_request *req)
 {
@@ -524,7 +568,8 @@ static int ecm_qc_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 			 * we can disconnect the port from the network layer.
 			 */
 			ecm_qc_bam_disconnect(ecm);
-			gether_qc_disconnect_name(&ecm->port, "ecm0");
+			if (ecm->xport != USB_GADGET_XPORT_BAM2BAM_IPA)
+				gether_qc_disconnect_name(&ecm->port, "ecm0");
 		}
 
 		if (!ecm->port.in_ep->desc ||
@@ -553,9 +598,12 @@ static int ecm_qc_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 				);
 			ecm->port.cdc_filter = DEFAULT_FILTER;
 			DBG(cdev, "activate ecm\n");
-			net = gether_qc_connect_name(&ecm->port, "ecm0");
-			if (IS_ERR(net))
-				return PTR_ERR(net);
+			if (ecm->xport != USB_GADGET_XPORT_BAM2BAM_IPA) {
+				net = gether_qc_connect_name(&ecm->port,
+								"ecm0", true);
+				if (IS_ERR(net))
+					return PTR_ERR(net);
+			}
 
 			if (ecm_qc_bam_connect(ecm))
 				goto fail;
@@ -597,7 +645,8 @@ static void ecm_qc_disable(struct usb_function *f)
 
 	if (ecm->port.in_ep->driver_data) {
 		ecm_qc_bam_disconnect(ecm);
-		gether_qc_disconnect_name(&ecm->port, "ecm0");
+		if (ecm->xport != USB_GADGET_XPORT_BAM2BAM_IPA)
+			gether_qc_disconnect_name(&ecm->port, "ecm0");
 	}
 
 	if (ecm->notify->driver_data) {
@@ -605,6 +654,20 @@ static void ecm_qc_disable(struct usb_function *f)
 		ecm->notify->driver_data = NULL;
 		ecm->notify->desc = NULL;
 	}
+}
+
+static void ecm_qc_suspend(struct usb_function *f)
+{
+	pr_debug("ecm suspended\n");
+
+	bam_data_suspend(ECM_QC_ACTIVE_PORT);
+}
+
+static void ecm_qc_resume(struct usb_function *f)
+{
+	pr_debug("ecm resumed\n");
+
+	bam_data_resume(ECM_QC_ACTIVE_PORT);
 }
 
 /*-------------------------------------------------------------------------*/
@@ -662,6 +725,7 @@ ecm_qc_bind(struct usb_configuration *c, struct usb_function *f)
 	status = usb_interface_id(c, f);
 	if (status < 0)
 		goto fail;
+
 	ecm->ctrl_id = status;
 
 	ecm_qc_control_intf.bInterfaceNumber = status;
@@ -670,6 +734,7 @@ ecm_qc_bind(struct usb_configuration *c, struct usb_function *f)
 	status = usb_interface_id(c, f);
 	if (status < 0)
 		goto fail;
+
 	ecm->data_id = status;
 
 	ecm_qc_data_nop_intf.bInterfaceNumber = status;
@@ -789,6 +854,10 @@ ecm_qc_unbind(struct usb_configuration *c, struct usb_function *f)
 	usb_ep_free_request(ecm->notify, ecm->notify_req);
 
 	ecm_qc_string_defs[1].s = NULL;
+
+	if (ecm->xport == USB_GADGET_XPORT_BAM2BAM_IPA)
+		ecm_ipa_cleanup(ipa_params.private);
+
 	kfree(ecm);
 }
 
@@ -797,6 +866,7 @@ ecm_qc_unbind(struct usb_configuration *c, struct usb_function *f)
  * @c: the configuration to support the network link
  * @ethaddr: a buffer in which the ethernet address of the host side
  *	side of the link was recorded
+ * @xport_name: data path transport type name ("BAM2BAM" or "BAM2BAM_IPA")
  * Context: single threaded during gadget setup
  *
  * Returns zero on success, else negative errno.
@@ -805,7 +875,8 @@ ecm_qc_unbind(struct usb_configuration *c, struct usb_function *f)
  * for calling @gether_cleanup() before module unload.
  */
 int
-ecm_qc_bind_config(struct usb_configuration *c, u8 ethaddr[ETH_ALEN])
+ecm_qc_bind_config(struct usb_configuration *c, u8 ethaddr[ETH_ALEN],
+	char *xport_name)
 {
 	struct f_ecm_qc		*ecm;
 	int		status;
@@ -818,6 +889,8 @@ ecm_qc_bind_config(struct usb_configuration *c, u8 ethaddr[ETH_ALEN])
 		pr_err("bam setup failed");
 		return status;
 	}
+
+	pr_debug("data transport type is %s", xport_name);
 
 	/* maybe allocate device-global string IDs */
 	if (ecm_qc_string_defs[0].id == 0) {
@@ -849,11 +922,24 @@ ecm_qc_bind_config(struct usb_configuration *c, u8 ethaddr[ETH_ALEN])
 	if (!ecm)
 		return -ENOMEM;
 
+	ecm->xport = str_to_xport(xport_name);
+	pr_debug("set xport = %d", ecm->xport);
+
 	/* export host's Ethernet address in CDC format */
-	snprintf(ecm->ethaddr, sizeof ecm->ethaddr,
+	if (ecm->xport == USB_GADGET_XPORT_BAM2BAM_IPA) {
+		gether_qc_get_macs(ipa_params.device_ethaddr,
+				ipa_params.host_ethaddr);
+		snprintf(ecm->ethaddr, sizeof ecm->ethaddr,
+		"%02X%02X%02X%02X%02X%02X",
+		ipa_params.host_ethaddr[0], ipa_params.host_ethaddr[1],
+		ipa_params.host_ethaddr[2], ipa_params.host_ethaddr[3],
+		ipa_params.host_ethaddr[4], ipa_params.host_ethaddr[5]);
+	} else
+		snprintf(ecm->ethaddr, sizeof ecm->ethaddr,
 		"%02X%02X%02X%02X%02X%02X",
 		ethaddr[0], ethaddr[1], ethaddr[2],
 		ethaddr[3], ethaddr[4], ethaddr[5]);
+
 	ecm_qc_string_defs[1].s = ecm->ethaddr;
 
 	ecm->port.cdc_filter = DEFAULT_FILTER;
@@ -867,11 +953,30 @@ ecm_qc_bind_config(struct usb_configuration *c, u8 ethaddr[ETH_ALEN])
 	ecm->port.func.get_alt = ecm_qc_get_alt;
 	ecm->port.func.setup = ecm_qc_setup;
 	ecm->port.func.disable = ecm_qc_disable;
+	ecm->port.func.suspend = ecm_qc_suspend;
+	ecm->port.func.resume = ecm_qc_resume;
 
 	status = usb_add_function(c, &ecm->port.func);
 	if (status) {
+		pr_err("failed to add function");
 		ecm_qc_string_defs[1].s = NULL;
 		kfree(ecm);
+		return status;
 	}
+
+	if (ecm->xport != USB_GADGET_XPORT_BAM2BAM_IPA)
+		return status;
+
+	pr_debug("setting ecm_ipa, host_ethaddr=%pM, device_ethaddr=%pM",
+			ipa_params.host_ethaddr, ipa_params.device_ethaddr);
+	status = ecm_ipa_init(&ipa_params);
+	if (status) {
+		pr_err("failed to initialize ecm_ipa");
+		ecm_qc_string_defs[1].s = NULL;
+		kfree(ecm);
+	} else {
+		pr_debug("ecm_ipa successful created");
+	}
+
 	return status;
 }

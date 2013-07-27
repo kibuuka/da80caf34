@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,6 +29,8 @@
 	(((ver == TABLA_VERSION_1_0) || (ver == TABLA_VERSION_1_1)) ? 1 : 0)
 #define TABLA_IS_2_0(ver) ((ver == TABLA_VERSION_2_0) ? 1 : 0)
 
+#define WCD9XXX_SUPPLY_BUCK_NAME "cdc-vdd-buck"
+
 #define SITAR_VERSION_1P0 0
 #define SITAR_VERSION_1P1 1
 #define SITAR_IS_1P0(ver) \
@@ -36,11 +38,18 @@
 #define SITAR_IS_1P1(ver) \
 	((ver == SITAR_VERSION_1P1) ? 1 : 0)
 
-
-#define TAIKO_VERSION_1_0	0
+#define TAIKO_VERSION_1_0	1
 #define TAIKO_IS_1_0(ver) \
 	((ver == TAIKO_VERSION_1_0) ? 1 : 0)
 
+#define TAPAN_VERSION_1_0	0
+#define TAPAN_IS_1_0(ver) \
+	((ver == TAPAN_VERSION_1_0) ? 1 : 0)
+
+enum wcd9xxx_slim_slave_addr_type {
+	WCD9XXX_SLIM_SLAVE_ADDR_TYPE_TABLA,
+	WCD9XXX_SLIM_SLAVE_ADDR_TYPE_TAIKO,
+};
 
 enum {
 	/* INTR_REG 0 */
@@ -68,7 +77,8 @@ enum {
 	WCD9XXX_IRQ_HPH_L_PA_STARTUP,
 	WCD9XXX_IRQ_HPH_R_PA_STARTUP,
 	WCD9XXX_IRQ_EAR_PA_STARTUP,
-	WCD9XXX_IRQ_RESERVED_0,
+	WCD9310_NUM_IRQS,
+	WCD9XXX_IRQ_RESERVED_0 = WCD9310_NUM_IRQS,
 	WCD9XXX_IRQ_RESERVED_1,
 	/* INTR_REG 3 */
 	WCD9XXX_IRQ_MAD_AUDIO,
@@ -76,12 +86,14 @@ enum {
 	WCD9XXX_IRQ_MAD_ULTRASOUND,
 	WCD9XXX_IRQ_SPEAKER_CLIPPING,
 	WCD9XXX_IRQ_MBHC_JACK_SWITCH,
+	WCD9XXX_IRQ_VBAT_MONITOR_ATTACK,
+	WCD9XXX_IRQ_VBAT_MONITOR_RELEASE,
 	WCD9XXX_NUM_IRQS,
 };
 
 enum {
-	TABLA_NUM_IRQS = WCD9XXX_NUM_IRQS,
-	SITAR_NUM_IRQS = WCD9XXX_NUM_IRQS,
+	TABLA_NUM_IRQS = WCD9310_NUM_IRQS,
+	SITAR_NUM_IRQS = WCD9310_NUM_IRQS,
 	TAIKO_NUM_IRQS = WCD9XXX_NUM_IRQS,
 	TAPAN_NUM_IRQS = WCD9XXX_NUM_IRQS,
 };
@@ -141,6 +153,17 @@ enum wcd9xxx_intf_status {
 #define WCD9XXX_CH(xport, xshift) \
 	{.port = xport, .shift = xshift}
 
+struct wcd9xxx_codec_type {
+	u16 id_major;
+	u16 id_minor;
+	struct mfd_cell *dev;
+	int size;
+	int num_irqs;
+	int version; /* -1 to retrive version from chip version register */
+	enum wcd9xxx_slim_slave_addr_type slim_slave_type;
+	u16 i2c_chip_status;
+};
+
 struct wcd9xxx {
 	struct device *dev;
 	struct slim_device *slim;
@@ -148,6 +171,7 @@ struct wcd9xxx {
 	struct mutex io_lock;
 	struct mutex xfer_lock;
 	struct mutex irq_lock;
+	struct mutex nested_irq_lock;
 	u8 version;
 
 	int reset_gpio;
@@ -156,6 +180,10 @@ struct wcd9xxx {
 			int bytes, void *dest, bool interface_reg);
 	int (*write_dev)(struct wcd9xxx *wcd9xxx, unsigned short reg,
 			int bytes, void *src, bool interface_reg);
+	int (*post_reset)(struct wcd9xxx *wcd9xxx);
+
+	void *ssr_priv;
+	bool slim_device_bootup;
 
 	u32 num_of_supplies;
 	struct regulator_bulk_data *supplies;
@@ -167,20 +195,22 @@ struct wcd9xxx {
 	struct pm_qos_request pm_qos_req;
 	int wlock_holders;
 
-	u8 idbyte[4];
+	u16 id_minor;
+	u16 id_major;
 
 	unsigned int irq_base;
 	unsigned int irq;
 	u8 irq_masks_cur[WCD9XXX_NUM_IRQ_REGS];
 	u8 irq_masks_cache[WCD9XXX_NUM_IRQ_REGS];
 	bool irq_level_high[WCD9XXX_MAX_NUM_IRQS];
-	int num_irqs;
 	/* Slimbus or I2S port */
 	u32 num_rx_port;
 	u32 num_tx_port;
 	struct wcd9xxx_ch *rx_chs;
 	struct wcd9xxx_ch *tx_chs;
 	u32 mclk_rate;
+
+	const struct wcd9xxx_codec_type *codec_type;
 };
 
 int wcd9xxx_reg_read(struct wcd9xxx *wcd9xxx, unsigned short reg);
@@ -200,6 +230,8 @@ enum wcd9xxx_intf_status wcd9xxx_get_intf_type(void);
 
 bool wcd9xxx_lock_sleep(struct wcd9xxx *wcd9xxx);
 void wcd9xxx_unlock_sleep(struct wcd9xxx *wcd9xxx);
+void wcd9xxx_nested_irq_lock(struct wcd9xxx *wcd9xxx);
+void wcd9xxx_nested_irq_unlock(struct wcd9xxx *wcd9xxx);
 enum wcd9xxx_pm_state wcd9xxx_pm_cmpxchg(struct wcd9xxx *wcd9xxx,
 				enum wcd9xxx_pm_state o,
 				enum wcd9xxx_pm_state n);

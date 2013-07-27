@@ -1,7 +1,7 @@
 /*
  *  Copyright (C) 2002 ARM Ltd.
  *  All Rights Reserved
- *  Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+ *  Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -35,7 +35,6 @@
 #define VDD_SC1_ARRAY_CLAMP_GFS_CTL 0x15A0
 #define SCSS_CPU1CORE_RESET 0xD80
 #define SCSS_DBG_STATUS_CORE_PWRDUP 0xE64
-#define BOOT_REMAP_ENABLE 0x01
 
 /*
  * control for which core is the next to come out of the secondary
@@ -82,7 +81,7 @@ void __cpuinit platform_secondary_init(unsigned int cpu)
 	spin_unlock(&boot_lock);
 }
 
-static int __cpuinit release_secondary_sim(unsigned long base, int cpu)
+static int __cpuinit release_secondary_sim(unsigned long base, unsigned int cpu)
 {
 	void *base_ptr = ioremap_nocache(base + (cpu * 0x10000), SZ_4K);
 	if (!base_ptr)
@@ -112,7 +111,8 @@ static int __cpuinit scorpion_release_secondary(void)
 	return 0;
 }
 
-static int __cpuinit msm8960_release_secondary(unsigned long base, int cpu)
+static int __cpuinit msm8960_release_secondary(unsigned long base,
+						unsigned int cpu)
 {
 	void *base_ptr = ioremap_nocache(base + (cpu * 0x10000), SZ_4K);
 	if (!base_ptr)
@@ -143,7 +143,8 @@ static int __cpuinit msm8960_release_secondary(unsigned long base, int cpu)
 	return 0;
 }
 
-static int __cpuinit msm8974_release_secondary(unsigned long base, int cpu)
+static int __cpuinit msm8974_release_secondary(unsigned long base,
+						unsigned int cpu)
 {
 	void *base_ptr = ioremap_nocache(base + (cpu * 0x10000), SZ_4K);
 	if (!base_ptr)
@@ -164,6 +165,41 @@ static int __cpuinit msm8974_release_secondary(unsigned long base, int cpu)
 
 	writel_relaxed(0x080, base_ptr+0x04);
 	mb();
+	iounmap(base_ptr);
+	return 0;
+}
+
+static int __cpuinit arm_release_secondary(unsigned long base, unsigned int cpu)
+{
+	void *base_ptr = ioremap_nocache(base + (cpu * 0x10000), SZ_4K);
+	if (!base_ptr)
+		return -ENODEV;
+
+	writel_relaxed(0x00000033, base_ptr+0x04);
+	mb();
+
+	writel_relaxed(0x10000001, base_ptr+0x14);
+	mb();
+	udelay(2);
+
+	writel_relaxed(0x00000031, base_ptr+0x04);
+	mb();
+
+	writel_relaxed(0x00000039, base_ptr+0x04);
+	mb();
+	udelay(2);
+
+	writel_relaxed(0x00020038, base_ptr+0x04);
+	mb();
+	udelay(2);
+
+
+	writel_relaxed(0x00020008, base_ptr+0x04);
+	mb();
+
+	writel_relaxed(0x00020088, base_ptr+0x04);
+	mb();
+
 	iounmap(base_ptr);
 	return 0;
 }
@@ -246,11 +282,9 @@ int __cpuinit msm8974_boot_secondary(unsigned int cpu, struct task_struct *idle)
 	pr_debug("Starting secondary CPU %d\n", cpu);
 
 	if (per_cpu(cold_boot_done, cpu) == false) {
-		if (machine_is_msm8974_sim() || machine_is_mpq8092_sim())
+		if (of_board_is_sim())
 			release_secondary_sim(0xf9088000, cpu);
-		else if (machine_is_msm8974_rumi())
-			return 0;
-		else
+		else if (!of_board_is_rumi())
 			msm8974_release_secondary(0xf9088000, cpu);
 
 		per_cpu(cold_boot_done, cpu) = true;
@@ -263,8 +297,10 @@ int __cpuinit arm_boot_secondary(unsigned int cpu, struct task_struct *idle)
 	pr_debug("Starting secondary CPU %d\n", cpu);
 
 	if (per_cpu(cold_boot_done, cpu) == false) {
-		if (machine_is_msm8226_sim() || machine_is_msm8910_sim())
+		if (of_board_is_sim())
 			release_secondary_sim(0xf9088000, cpu);
+		else if (!of_board_is_rumi())
+			arm_release_secondary(0xf9088000, cpu);
 
 		per_cpu(cold_boot_done, cpu) = true;
 	}
@@ -335,27 +371,9 @@ static void __init msm_platform_smp_prepare_cpus(unsigned int max_cpus)
 		pr_warn("Failed to set CPU boot address\n");
 }
 
-static void __init arm_platform_smp_prepare_cpus(unsigned int max_cpus)
-{
-	void *remap_ptr = ioremap_nocache(0xF9010000, SZ_4K);
-	if (!remap_ptr) {
-		pr_err("Failed to ioremap for secondary cores\n");
-		return;
-	}
-
-	/*
-	 * Write the address of secondary startup into boot remapper
-	 * register and enable boot remapping.
-	 */
-	__raw_writel((virt_to_phys(msm_secondary_startup)|BOOT_REMAP_ENABLE),
-			(remap_ptr + 0x4));
-	mb();
-	iounmap(remap_ptr);
-}
-
 struct smp_operations arm_smp_ops __initdata = {
 	.smp_init_cpus = arm_smp_init_cpus,
-	.smp_prepare_cpus = arm_platform_smp_prepare_cpus,
+	.smp_prepare_cpus = msm_platform_smp_prepare_cpus,
 	.smp_secondary_init = platform_secondary_init,
 	.smp_boot_secondary = arm_boot_secondary,
 	.cpu_kill = platform_cpu_kill,

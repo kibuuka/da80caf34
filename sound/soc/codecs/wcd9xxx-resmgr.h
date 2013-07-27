@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -125,6 +125,10 @@ struct wcd9xxx_resmgr {
 	/* Notifier needs mbhc pointer with resmgr */
 	struct wcd9xxx_mbhc *mbhc;
 
+	unsigned long cond_flags;
+	struct list_head update_bit_cond_h;
+	struct mutex update_bit_cond_lock;
+
 	/*
 	 * Currently, only used for mbhc purpose, to protect
 	 * concurrent execution of mbhc threaded irq handlers and
@@ -158,6 +162,7 @@ void wcd9xxx_resmgr_cfilt_put(struct wcd9xxx_resmgr *resmgr,
 			      enum wcd9xxx_cfilt_sel cfilt_sel);
 
 void wcd9xxx_resmgr_bcl_lock(struct wcd9xxx_resmgr *resmgr);
+void wcd9xxx_resmgr_post_ssr(struct wcd9xxx_resmgr *resmgr);
 #define WCD9XXX_BCL_LOCK(resmgr)			\
 {							\
 	pr_debug("%s: Acquiring BCL\n", __func__);	\
@@ -187,5 +192,20 @@ int wcd9xxx_resmgr_unregister_notifier(struct wcd9xxx_resmgr *resmgr,
 				       struct notifier_block *nblock);
 void wcd9xxx_resmgr_notifier_call(struct wcd9xxx_resmgr *resmgr,
 				  const enum wcd9xxx_notify_event e);
+
+enum wcd9xxx_resmgr_cond {
+	WCD9XXX_COND_HPH = 0x01, /* Headphone */
+	WCD9XXX_COND_HPH_MIC = 0x02, /* Microphone on the headset */
+};
+int wcd9xxx_resmgr_rm_cond_update_bits(struct wcd9xxx_resmgr *resmgr,
+				       enum wcd9xxx_resmgr_cond cond,
+				       unsigned short reg, int shift,
+				       bool invert);
+int wcd9xxx_resmgr_add_cond_update_bits(struct wcd9xxx_resmgr *resmgr,
+					enum wcd9xxx_resmgr_cond cond,
+					unsigned short reg, int shift,
+					bool invert);
+void wcd9xxx_resmgr_cond_update_cond(struct wcd9xxx_resmgr *resmgr,
+				     enum wcd9xxx_resmgr_cond cond, bool set);
 
 #endif /* __WCD9XXX_COMMON_H__ */

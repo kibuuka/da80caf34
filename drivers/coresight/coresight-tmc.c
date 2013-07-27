@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,8 +26,10 @@
 #include <linux/delay.h>
 #include <linux/spinlock.h>
 #include <linux/clk.h>
+#include <linux/of.h>
 #include <linux/of_coresight.h>
 #include <linux/coresight.h>
+#include <linux/coresight-cti.h>
 #include <linux/usb/usb_qdss.h>
 #include <mach/memory.h>
 #include <mach/sps.h>
@@ -50,41 +52,45 @@ do {									\
 	mb();								\
 } while (0)
 
-#define TMC_RSZ			(0x004)
-#define TMC_STS			(0x00C)
-#define TMC_RRD			(0x010)
-#define TMC_RRP			(0x014)
-#define TMC_RWP			(0x018)
-#define TMC_TRG			(0x01C)
-#define TMC_CTL			(0x020)
-#define TMC_RWD			(0x024)
-#define TMC_MODE		(0x028)
-#define TMC_LBUFLEVEL		(0x02C)
-#define TMC_CBUFLEVEL		(0x030)
-#define TMC_BUFWM		(0x034)
-#define TMC_RRPHI		(0x038)
-#define TMC_RWPHI		(0x03C)
-#define TMC_AXICTL		(0x110)
-#define TMC_DBALO		(0x118)
-#define TMC_DBAHI		(0x11C)
-#define TMC_FFSR		(0x300)
-#define TMC_FFCR		(0x304)
-#define TMC_PSCR		(0x308)
-#define TMC_ITMISCOP0		(0xEE0)
-#define TMC_ITTRFLIN		(0xEE8)
-#define TMC_ITATBDATA0		(0xEEC)
-#define TMC_ITATBCTR2		(0xEF0)
-#define TMC_ITATBCTR1		(0xEF4)
-#define TMC_ITATBCTR0		(0xEF8)
+#define TMC_RSZ				(0x004)
+#define TMC_STS				(0x00C)
+#define TMC_RRD				(0x010)
+#define TMC_RRP				(0x014)
+#define TMC_RWP				(0x018)
+#define TMC_TRG				(0x01C)
+#define TMC_CTL				(0x020)
+#define TMC_RWD				(0x024)
+#define TMC_MODE			(0x028)
+#define TMC_LBUFLEVEL			(0x02C)
+#define TMC_CBUFLEVEL			(0x030)
+#define TMC_BUFWM			(0x034)
+#define TMC_RRPHI			(0x038)
+#define TMC_RWPHI			(0x03C)
+#define TMC_AXICTL			(0x110)
+#define TMC_DBALO			(0x118)
+#define TMC_DBAHI			(0x11C)
+#define TMC_FFSR			(0x300)
+#define TMC_FFCR			(0x304)
+#define TMC_PSCR			(0x308)
+#define TMC_ITMISCOP0			(0xEE0)
+#define TMC_ITTRFLIN			(0xEE8)
+#define TMC_ITATBDATA0			(0xEEC)
+#define TMC_ITATBCTR2			(0xEF0)
+#define TMC_ITATBCTR1			(0xEF4)
+#define TMC_ITATBCTR0			(0xEF8)
 
-#define BYTES_PER_WORD		4
-#define TMC_ETR_BAM_PIPE_INDEX	0
-#define TMC_ETR_BAM_NR_PIPES	2
+#define BYTES_PER_WORD			4
+#define TMC_ETR_BAM_PIPE_INDEX		0
+#define TMC_ETR_BAM_NR_PIPES		2
 
-#define TMC_ETFETB_DUMP_VER_OFF	(4)
-#define TMC_ETFETB_DUMP_VER	(1)
-#define TMC_REG_DUMP_VER_OFF	(4)
-#define TMC_REG_DUMP_VER	(1)
+#define TMC_ETFETB_DUMP_MAGIC_OFF	(0)
+#define TMC_ETFETB_DUMP_MAGIC		(0x5D1DB1BF)
+#define TMC_ETFETB_DUMP_VER_OFF		(4)
+#define TMC_ETFETB_DUMP_VER		(1)
+#define TMC_REG_DUMP_MAGIC_OFF		(0)
+#define TMC_REG_DUMP_MAGIC		(0x5D1DB1BF)
+#define TMC_REG_DUMP_VER_OFF		(4)
+#define TMC_REG_DUMP_VER		(1)
 
 enum tmc_config_type {
 	TMC_CONFIG_TYPE_ETB,
@@ -131,9 +137,14 @@ struct tmc_drvdata {
 	struct miscdevice	miscdev;
 	struct clk		*clk;
 	spinlock_t		spinlock;
+	bool			reset_flush_race;
+	struct coresight_cti	*cti_flush;
+	struct coresight_cti	*cti_reset;
 	struct mutex		read_lock;
 	int			read_count;
 	bool			reading;
+	bool			aborting;
+	char			*reg_buf;
 	char			*buf;
 	unsigned long		paddr;
 	void __iomem		*vaddr;
@@ -147,6 +158,18 @@ struct tmc_drvdata {
 	enum tmc_config_type	config_type;
 	uint32_t		trigger_cntr;
 };
+
+static void tmc_wait_for_flush(struct tmc_drvdata *drvdata)
+{
+	int count;
+
+	/* Ensure no flush is in progress */
+	for (count = TIMEOUT_US; BVAL(tmc_readl(drvdata, TMC_FFSR), 0) != 0
+				&& count > 0; count--)
+		udelay(1);
+	WARN(count == 0, "timeout while waiting for TMC flush, TMC_FFSR: %#x\n",
+	     tmc_readl(drvdata, TMC_FFSR));
+}
 
 static void tmc_wait_for_ready(struct tmc_drvdata *drvdata)
 {
@@ -194,7 +217,7 @@ static void tmc_etr_fill_usb_bam_data(struct tmc_drvdata *drvdata)
 {
 	struct tmc_etr_bam_data *bamdata = drvdata->bamdata;
 
-	get_bam2bam_connection_info(0, PEER_PERIPHERAL_TO_USB,
+	get_bam2bam_connection_info(usb_bam_get_qdss_idx(0),
 				    &bamdata->dest,
 				    &bamdata->dest_pipe_idx,
 				    &bamdata->src_pipe_idx,
@@ -231,7 +254,7 @@ static void __tmc_etr_enable_to_bam(struct tmc_drvdata *drvdata)
 
 	tmc_writel(drvdata, bamdata->data_fifo.phys_base, TMC_DBALO);
 	tmc_writel(drvdata, 0x0, TMC_DBAHI);
-	tmc_writel(drvdata, 0x133, TMC_FFCR);
+	tmc_writel(drvdata, 0x103, TMC_FFCR);
 	tmc_writel(drvdata, drvdata->trigger_cntr, TMC_TRG);
 	__tmc_enable(drvdata);
 
@@ -248,7 +271,12 @@ static int tmc_etr_bam_enable(struct tmc_drvdata *drvdata)
 	if (bamdata->enable)
 		return 0;
 
-	/* Configure and enable ndp bam */
+	/* Reset bam to start with */
+	ret = sps_device_reset(bamdata->handle);
+	if (ret)
+		goto err0;
+
+	/* Now configure and enable bam */
 
 	bamdata->pipe = sps_alloc_endpoint();
 	if (!bamdata->pipe)
@@ -256,7 +284,7 @@ static int tmc_etr_bam_enable(struct tmc_drvdata *drvdata)
 
 	ret = sps_get_config(bamdata->pipe, &bamdata->connect);
 	if (ret)
-		goto err;
+		goto err1;
 
 	bamdata->connect.mode = SPS_MODE_SRC;
 	bamdata->connect.source = bamdata->handle;
@@ -271,12 +299,13 @@ static int tmc_etr_bam_enable(struct tmc_drvdata *drvdata)
 
 	ret = sps_connect(bamdata->pipe, &bamdata->connect);
 	if (ret)
-		goto err;
+		goto err1;
 
 	bamdata->enable = true;
 	return 0;
-err:
+err1:
 	sps_free_endpoint(bamdata->pipe);
+err0:
 	return ret;
 }
 
@@ -285,14 +314,18 @@ static void __tmc_etr_disable_to_bam(struct tmc_drvdata *drvdata)
 	if (!drvdata->enable_to_bam)
 		return;
 
+	/* Ensure periodic flush is disabled in CSR block */
+	msm_qdss_csr_disable_flush();
+
 	TMC_UNLOCK(drvdata);
 
+	tmc_wait_for_flush(drvdata);
 	tmc_flush_and_stop(drvdata);
 	__tmc_disable(drvdata);
 
 	TMC_LOCK(drvdata);
 
-	/* Disable CSR registers */
+	/* Disable CSR configuration */
 	msm_qdss_csr_disable_bam_to_usb();
 	drvdata->enable_to_bam = false;
 }
@@ -343,7 +376,7 @@ static void __tmc_etb_enable(struct tmc_drvdata *drvdata)
 	TMC_UNLOCK(drvdata);
 
 	tmc_writel(drvdata, TMC_MODE_CIRCULAR_BUFFER, TMC_MODE);
-	tmc_writel(drvdata, 0x133, TMC_FFCR);
+	tmc_writel(drvdata, 0x1133, TMC_FFCR);
 	tmc_writel(drvdata, drvdata->trigger_cntr, TMC_TRG);
 	__tmc_enable(drvdata);
 
@@ -372,7 +405,7 @@ static void __tmc_etr_enable_to_mem(struct tmc_drvdata *drvdata)
 
 	tmc_writel(drvdata, drvdata->paddr, TMC_DBALO);
 	tmc_writel(drvdata, 0x0, TMC_DBAHI);
-	tmc_writel(drvdata, 0x133, TMC_FFCR);
+	tmc_writel(drvdata, 0x1133, TMC_FFCR);
 	tmc_writel(drvdata, drvdata->trigger_cntr, TMC_TRG);
 	__tmc_enable(drvdata);
 
@@ -401,8 +434,15 @@ static int tmc_enable(struct tmc_drvdata *drvdata, enum tmc_mode mode)
 		return ret;
 
 	mutex_lock(&drvdata->usb_lock);
-	if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
-		if (drvdata->out_mode == TMC_ETR_OUT_MODE_USB) {
+	if (drvdata->config_type == TMC_CONFIG_TYPE_ETB) {
+		coresight_cti_map_trigout(drvdata->cti_flush, 1, 0);
+		coresight_cti_map_trigin(drvdata->cti_reset, 0, 0);
+	} else if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
+		if (drvdata->out_mode == TMC_ETR_OUT_MODE_MEM &&
+		    !drvdata->reset_flush_race) {
+			coresight_cti_map_trigout(drvdata->cti_flush, 3, 0);
+			coresight_cti_map_trigin(drvdata->cti_reset, 0, 0);
+		} else if (drvdata->out_mode == TMC_ETR_OUT_MODE_USB) {
 			drvdata->usbch = usb_qdss_open("qdss", drvdata,
 						       usb_notifier);
 			if (IS_ERR(drvdata->usbch)) {
@@ -410,6 +450,11 @@ static int tmc_enable(struct tmc_drvdata *drvdata, enum tmc_mode mode)
 				ret = PTR_ERR(drvdata->usbch);
 				goto err0;
 			}
+		}
+	} else {
+		if (mode == TMC_MODE_CIRCULAR_BUFFER) {
+			coresight_cti_map_trigout(drvdata->cti_flush, 1, 0);
+			coresight_cti_map_trigin(drvdata->cti_reset, 0, 0);
 		}
 	}
 
@@ -462,10 +507,64 @@ static int tmc_enable_link(struct coresight_device *csdev, int inport,
 	return tmc_enable(drvdata, TMC_MODE_HARDWARE_FIFO);
 }
 
+static void __tmc_reg_dump(struct tmc_drvdata *drvdata)
+{
+	char *reg_hdr;
+	uint32_t *reg_buf;
+
+	if (!drvdata->reg_buf || !drvdata->aborting)
+		return;
+
+	reg_hdr = drvdata->reg_buf - PAGE_SIZE;
+	reg_buf = (uint32_t *)drvdata->reg_buf;
+
+	reg_buf[1] = tmc_readl(drvdata, TMC_RSZ);
+	reg_buf[3] = tmc_readl(drvdata, TMC_STS);
+	reg_buf[5] = tmc_readl(drvdata, TMC_RRP);
+	reg_buf[6] = tmc_readl(drvdata, TMC_RWP);
+	reg_buf[7] = tmc_readl(drvdata, TMC_TRG);
+	reg_buf[8] = tmc_readl(drvdata, TMC_CTL);
+	reg_buf[10] = tmc_readl(drvdata, TMC_MODE);
+	reg_buf[11] = tmc_readl(drvdata, TMC_LBUFLEVEL);
+	reg_buf[12] = tmc_readl(drvdata, TMC_CBUFLEVEL);
+	reg_buf[13] = tmc_readl(drvdata, TMC_BUFWM);
+	if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
+		reg_buf[14] = tmc_readl(drvdata, TMC_RRPHI);
+		reg_buf[15] = tmc_readl(drvdata, TMC_RWPHI);
+		reg_buf[68] = tmc_readl(drvdata, TMC_AXICTL);
+		reg_buf[70] = tmc_readl(drvdata, TMC_DBALO);
+		reg_buf[71] = tmc_readl(drvdata, TMC_DBAHI);
+	}
+	reg_buf[192] = tmc_readl(drvdata, TMC_FFSR);
+	reg_buf[193] = tmc_readl(drvdata, TMC_FFCR);
+	reg_buf[194] = tmc_readl(drvdata, TMC_PSCR);
+	reg_buf[1000] = tmc_readl(drvdata, CORESIGHT_CLAIMSET);
+	reg_buf[1001] = tmc_readl(drvdata, CORESIGHT_CLAIMCLR);
+	reg_buf[1005] = tmc_readl(drvdata, CORESIGHT_LSR);
+	reg_buf[1006] = tmc_readl(drvdata, CORESIGHT_AUTHSTATUS);
+	reg_buf[1010] = tmc_readl(drvdata, CORESIGHT_DEVID);
+	reg_buf[1011] = tmc_readl(drvdata, CORESIGHT_DEVTYPE);
+	reg_buf[1012] = tmc_readl(drvdata, CORESIGHT_PERIPHIDR4);
+	reg_buf[1013] = tmc_readl(drvdata, CORESIGHT_PERIPHIDR5);
+	reg_buf[1014] = tmc_readl(drvdata, CORESIGHT_PERIPHIDR6);
+	reg_buf[1015] = tmc_readl(drvdata, CORESIGHT_PERIPHIDR7);
+	reg_buf[1016] = tmc_readl(drvdata, CORESIGHT_PERIPHIDR0);
+	reg_buf[1017] = tmc_readl(drvdata, CORESIGHT_PERIPHIDR1);
+	reg_buf[1018] = tmc_readl(drvdata, CORESIGHT_PERIPHIDR2);
+	reg_buf[1019] = tmc_readl(drvdata, CORESIGHT_PERIPHIDR3);
+	reg_buf[1020] = tmc_readl(drvdata, CORESIGHT_COMPIDR0);
+	reg_buf[1021] = tmc_readl(drvdata, CORESIGHT_COMPIDR1);
+	reg_buf[1022] = tmc_readl(drvdata, CORESIGHT_COMPIDR2);
+	reg_buf[1023] = tmc_readl(drvdata, CORESIGHT_COMPIDR3);
+
+	*(uint32_t *)(reg_hdr + TMC_REG_DUMP_MAGIC_OFF) = TMC_REG_DUMP_MAGIC;
+}
+
 static void __tmc_etb_dump(struct tmc_drvdata *drvdata)
 {
 	enum tmc_mem_intf_width memwidth;
 	uint8_t memwords;
+	char *hdr;
 	char *bufp;
 	uint32_t read_data;
 	int i;
@@ -485,10 +584,17 @@ static void __tmc_etb_dump(struct tmc_drvdata *drvdata)
 		for (i = 0; i < memwords; i++) {
 			read_data = tmc_readl(drvdata, TMC_RRD);
 			if (read_data == 0xFFFFFFFF)
-				return;
+				goto out;
 			memcpy(bufp, &read_data, BYTES_PER_WORD);
 			bufp += BYTES_PER_WORD;
 		}
+	}
+
+out:
+	if (drvdata->aborting) {
+		hdr = drvdata->buf - PAGE_SIZE;
+		*(uint32_t *)(hdr + TMC_ETFETB_DUMP_MAGIC_OFF) =
+							TMC_ETFETB_DUMP_MAGIC;
 	}
 }
 
@@ -498,6 +604,7 @@ static void __tmc_etb_disable(struct tmc_drvdata *drvdata)
 
 	tmc_flush_and_stop(drvdata);
 	__tmc_etb_dump(drvdata);
+	__tmc_reg_dump(drvdata);
 	__tmc_disable(drvdata);
 
 	TMC_LOCK(drvdata);
@@ -522,6 +629,7 @@ static void __tmc_etr_disable_to_mem(struct tmc_drvdata *drvdata)
 
 	tmc_flush_and_stop(drvdata);
 	__tmc_etr_dump(drvdata);
+	__tmc_reg_dump(drvdata);
 	__tmc_disable(drvdata);
 
 	TMC_LOCK(drvdata);
@@ -540,7 +648,6 @@ static void __tmc_etf_disable(struct tmc_drvdata *drvdata)
 static void tmc_disable(struct tmc_drvdata *drvdata, enum tmc_mode mode)
 {
 	unsigned long flags;
-	bool etr_bam_disable = false;
 
 	mutex_lock(&drvdata->usb_lock);
 	spin_lock_irqsave(&drvdata->spinlock, flags);
@@ -553,29 +660,43 @@ static void tmc_disable(struct tmc_drvdata *drvdata, enum tmc_mode mode)
 		if (drvdata->out_mode == TMC_ETR_OUT_MODE_MEM)
 			__tmc_etr_disable_to_mem(drvdata);
 		else if (drvdata->out_mode == TMC_ETR_OUT_MODE_USB)
-			etr_bam_disable = true;
+			__tmc_etr_disable_to_bam(drvdata);
 	} else {
 		if (mode == TMC_MODE_CIRCULAR_BUFFER)
 			__tmc_etb_disable(drvdata);
 		else
 			__tmc_etf_disable(drvdata);
 	}
-out:
 	drvdata->enable = false;
 	spin_unlock_irqrestore(&drvdata->spinlock, flags);
 
-	if (etr_bam_disable) {
-		if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
-			if (drvdata->out_mode == TMC_ETR_OUT_MODE_USB) {
-				spin_lock_irqsave(&drvdata->spinlock, flags);
-				__tmc_etr_disable_to_bam(drvdata);
-				spin_unlock_irqrestore(&drvdata->spinlock,
-						       flags);
-				tmc_etr_bam_disable(drvdata);
-				usb_qdss_close(drvdata->usbch);
-			}
+	if (drvdata->config_type == TMC_CONFIG_TYPE_ETB) {
+		coresight_cti_unmap_trigin(drvdata->cti_reset, 0, 0);
+		coresight_cti_unmap_trigout(drvdata->cti_flush, 1, 0);
+	} else if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
+		if (drvdata->out_mode == TMC_ETR_OUT_MODE_MEM &&
+		    !drvdata->reset_flush_race) {
+			coresight_cti_unmap_trigin(drvdata->cti_reset, 0, 0);
+			coresight_cti_unmap_trigout(drvdata->cti_flush, 3, 0);
+		} else if (drvdata->out_mode == TMC_ETR_OUT_MODE_USB) {
+			tmc_etr_bam_disable(drvdata);
+			usb_qdss_close(drvdata->usbch);
+		}
+	} else {
+		if (mode == TMC_MODE_CIRCULAR_BUFFER) {
+			coresight_cti_unmap_trigin(drvdata->cti_reset, 0, 0);
+			coresight_cti_unmap_trigout(drvdata->cti_flush, 1, 0);
 		}
 	}
+	mutex_unlock(&drvdata->usb_lock);
+
+	clk_disable_unprepare(drvdata->clk);
+
+	dev_info(drvdata->dev, "TMC disabled\n");
+	return;
+out:
+	drvdata->enable = false;
+	spin_unlock_irqrestore(&drvdata->spinlock, flags);
 	mutex_unlock(&drvdata->usb_lock);
 
 	clk_disable_unprepare(drvdata->clk);
@@ -604,6 +725,8 @@ static void tmc_abort(struct coresight_device *csdev)
 	unsigned long flags;
 	enum tmc_mode mode;
 
+	drvdata->aborting = true;
+
 	spin_lock_irqsave(&drvdata->spinlock, flags);
 	if (drvdata->reading)
 		goto out0;
@@ -613,6 +736,8 @@ static void tmc_abort(struct coresight_device *csdev)
 	} else if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
 		if (drvdata->out_mode == TMC_ETR_OUT_MODE_MEM)
 			__tmc_etr_disable_to_mem(drvdata);
+		else if (drvdata->out_mode == TMC_ETR_OUT_MODE_USB)
+			__tmc_etr_disable_to_bam(drvdata);
 	} else {
 		mode = tmc_readl(drvdata, TMC_MODE);
 		if (mode == TMC_MODE_CIRCULAR_BUFFER)
@@ -846,7 +971,6 @@ static ssize_t tmc_etr_store_out_mode(struct device *dev,
 	struct tmc_drvdata *drvdata = dev_get_drvdata(dev->parent);
 	char str[10] = "";
 	unsigned long flags;
-	bool etr_bam_flag = false;
 	int ret;
 
 	if (strlen(buf) >= 10)
@@ -860,42 +984,52 @@ static ssize_t tmc_etr_store_out_mode(struct device *dev,
 			goto out;
 
 		spin_lock_irqsave(&drvdata->spinlock, flags);
-		if (drvdata->enable) {
-			__tmc_etr_disable_to_bam(drvdata);
-			__tmc_etr_enable_to_mem(drvdata);
-			etr_bam_flag = true;
+		if (!drvdata->enable) {
+			drvdata->out_mode = TMC_ETR_OUT_MODE_MEM;
+			spin_unlock_irqrestore(&drvdata->spinlock, flags);
+			goto out;
 		}
+		__tmc_etr_disable_to_bam(drvdata);
+		__tmc_etr_enable_to_mem(drvdata);
 		drvdata->out_mode = TMC_ETR_OUT_MODE_MEM;
 		spin_unlock_irqrestore(&drvdata->spinlock, flags);
 
-		if (etr_bam_flag) {
-			tmc_etr_bam_disable(drvdata);
-			usb_qdss_close(drvdata->usbch);
+		if (!drvdata->reset_flush_race) {
+			coresight_cti_map_trigout(drvdata->cti_flush, 3, 0);
+			coresight_cti_map_trigin(drvdata->cti_reset, 0, 0);
 		}
+
+		tmc_etr_bam_disable(drvdata);
+		usb_qdss_close(drvdata->usbch);
 	} else if (!strcmp(str, "usb")) {
 		if (drvdata->out_mode == TMC_ETR_OUT_MODE_USB)
 			goto out;
 
 		spin_lock_irqsave(&drvdata->spinlock, flags);
-		if (drvdata->enable) {
-			if (drvdata->reading) {
-				ret = -EBUSY;
-				goto err1;
-			}
-			__tmc_etr_disable_to_mem(drvdata);
-			etr_bam_flag = true;
+		if (!drvdata->enable) {
+			drvdata->out_mode = TMC_ETR_OUT_MODE_USB;
+			spin_unlock_irqrestore(&drvdata->spinlock, flags);
+			goto out;
 		}
+		if (drvdata->reading) {
+			ret = -EBUSY;
+			goto err1;
+		}
+		__tmc_etr_disable_to_mem(drvdata);
 		drvdata->out_mode = TMC_ETR_OUT_MODE_USB;
 		spin_unlock_irqrestore(&drvdata->spinlock, flags);
 
-		if (etr_bam_flag) {
-			drvdata->usbch = usb_qdss_open("qdss", drvdata,
-						       usb_notifier);
-			if (IS_ERR(drvdata->usbch)) {
-				dev_err(drvdata->dev, "usb_qdss_open failed\n");
-				ret = PTR_ERR(drvdata->usbch);
-				goto err0;
-			}
+		if (!drvdata->reset_flush_race) {
+			coresight_cti_unmap_trigin(drvdata->cti_reset, 0, 0);
+			coresight_cti_unmap_trigout(drvdata->cti_flush, 3, 0);
+		}
+
+		drvdata->usbch = usb_qdss_open("qdss", drvdata,
+					       usb_notifier);
+		if (IS_ERR(drvdata->usbch)) {
+			dev_err(drvdata->dev, "usb_qdss_open failed\n");
+			ret = PTR_ERR(drvdata->usbch);
+			goto err0;
 		}
 	}
 out:
@@ -956,7 +1090,7 @@ static int __devinit tmc_etr_bam_init(struct platform_device *pdev,
 		return -ENOMEM;
 	drvdata->bamdata = bamdata;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "bam-base");
 	if (!res)
 		return -ENODEV;
 
@@ -997,6 +1131,7 @@ static int __devinit tmc_probe(struct platform_device *pdev)
 	static int count;
 	void *baddr;
 	struct msm_client_dump dump;
+	struct coresight_cti_data *ctidata;
 	struct coresight_desc *desc;
 
 	if (pdev->dev.of_node) {
@@ -1012,7 +1147,7 @@ static int __devinit tmc_probe(struct platform_device *pdev)
 	drvdata->dev = &pdev->dev;
 	platform_set_drvdata(pdev, drvdata);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "tmc-base");
 	if (!res)
 		return -ENODEV;
 	reg_size = resource_size(res);
@@ -1040,10 +1175,18 @@ static int __devinit tmc_probe(struct platform_device *pdev)
 	devid = tmc_readl(drvdata, CORESIGHT_DEVID);
 	drvdata->config_type = BMVAL(devid, 6, 7);
 
-	if (drvdata->config_type == TMC_CONFIG_TYPE_ETR)
-		drvdata->size = SZ_1M;
-	else
+	if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
+		if (pdev->dev.of_node) {
+			ret = of_property_read_u32(pdev->dev.of_node,
+				"qcom,memory-reservation-size", &drvdata->size);
+			if (ret) {
+				clk_disable_unprepare(drvdata->clk);
+				return ret;
+			}
+		}
+	} else {
 		drvdata->size = tmc_readl(drvdata, TMC_RSZ) * BYTES_PER_WORD;
+	}
 
 	clk_disable_unprepare(drvdata->clk);
 
@@ -1077,8 +1220,10 @@ static int __devinit tmc_probe(struct platform_device *pdev)
 		dump.start_addr = virt_to_phys(baddr);
 		dump.end_addr = dump.start_addr + PAGE_SIZE + drvdata->size;
 		ret = msm_dump_table_register(&dump);
-		/* Don't free the buffer in case of error since it can still
-		 * be used to provide dump collection via the device node
+		/*
+		 * Don't free the buffer in case of error since it can still
+		 * be used to provide dump collection via the device node or
+		 * as part of abort.
 		 */
 		if (ret)
 			dev_info(dev, "TMC ETF-ETB dump setup failed\n");
@@ -1087,19 +1232,44 @@ static int __devinit tmc_probe(struct platform_device *pdev)
 
 	baddr = devm_kzalloc(dev, PAGE_SIZE + reg_size, GFP_KERNEL);
 	if (baddr) {
+		drvdata->reg_buf = baddr + PAGE_SIZE;
 		*(uint32_t *)(baddr + TMC_REG_DUMP_VER_OFF) = TMC_REG_DUMP_VER;
 		dump.id = MSM_TMC0_REG + count;
 		dump.start_addr = virt_to_phys(baddr);
 		dump.end_addr = dump.start_addr + PAGE_SIZE + reg_size;
 		ret = msm_dump_table_register(&dump);
-		if (ret) {
-			devm_kfree(dev, baddr);
+		/*
+		 * Don't free the buffer in case of error since it can still
+		 * be used to dump registers as part of abort to aid post crash
+		 * parsing.
+		 */
+		if (ret)
 			dev_info(dev, "TMC REG dump setup failed\n");
-		}
 	} else {
 		dev_info(dev, "TMC REG dump space allocation failed\n");
 	}
 	count++;
+
+	if (pdev->dev.of_node) {
+		drvdata->reset_flush_race = of_property_read_bool(
+						pdev->dev.of_node,
+						"qcom,reset-flush-race");
+
+		ctidata = of_get_coresight_cti_data(dev, pdev->dev.of_node);
+		if (IS_ERR(ctidata)) {
+			dev_err(dev, "invalid cti data\n");
+		} else if (ctidata && ctidata->nr_ctis == 2) {
+			drvdata->cti_flush = coresight_cti_get(
+							ctidata->names[0]);
+			if (IS_ERR(drvdata->cti_flush))
+				dev_err(dev, "failed to get flush cti\n");
+
+			drvdata->cti_reset = coresight_cti_get(
+							ctidata->names[1]);
+			if (IS_ERR(drvdata->cti_reset))
+				dev_err(dev, "failed to get reset cti\n");
+		}
+	}
 
 	desc = devm_kzalloc(dev, sizeof(*desc), GFP_KERNEL);
 	if (!desc) {

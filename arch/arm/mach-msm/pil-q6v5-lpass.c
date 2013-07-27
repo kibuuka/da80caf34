@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,20 +21,26 @@
 #include <linux/workqueue.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
+#include <linux/sysfs.h>
+#include <linux/of_gpio.h>
 
 #include <mach/clk.h>
 #include <mach/subsystem_restart.h>
 #include <mach/subsystem_notif.h>
 #include <mach/scm.h>
+#include <mach/ramdump.h>
+#include <mach/msm_smem.h>
 
 #include "peripheral-loader.h"
 #include "pil-q6v5.h"
 #include "scm-pas.h"
-#include "ramdump.h"
 #include "sysmon.h"
 
 #define QDSP6SS_RST_EVB			0x010
 #define PROXY_TIMEOUT_MS		10000
+
+static struct kobject *lpass_status;
+static char status[32];
 
 struct lpass_data {
 	struct q6v5_data *q6;
@@ -43,9 +49,11 @@ struct lpass_data {
 	void *ramdump_dev;
 	int wdog_irq;
 	struct work_struct work;
-	void *riva_notif_hdle;
+	void *wcnss_notif_hdle;
 	void *modem_notif_hdle;
 	int crash_shutdown;
+	unsigned int err_fatal_irq;
+	int force_stop_gpio;
 };
 
 #define subsys_to_drv(d) container_of(d, struct lpass_data, subsys_desc)
@@ -110,6 +118,8 @@ static int pil_lpass_shutdown(struct pil_desc *pil)
 	pil_q6v5_shutdown(pil);
 	pil_lpass_disable_clks(drv);
 
+	writel_relaxed(1, drv->restart_reg);
+
 	drv->is_booted = false;
 
 	return 0;
@@ -118,8 +128,13 @@ static int pil_lpass_shutdown(struct pil_desc *pil)
 static int pil_lpass_reset(struct pil_desc *pil)
 {
 	struct q6v5_data *drv = container_of(pil, struct q6v5_data, desc);
-	unsigned long start_addr = pil_get_entry_addr(pil);
+	phys_addr_t start_addr = pil_get_entry_addr(pil);
 	int ret;
+
+	/* Deassert reset to subsystem and wait for propagation */
+	writel_relaxed(0, drv->restart_reg);
+	mb();
+	udelay(2);
 
 	ret = pil_lpass_enable_clks(drv);
 	if (ret)
@@ -153,42 +168,57 @@ static int pil_lpass_init_image_trusted(struct pil_desc *pil,
 	return pas_init_image(PAS_Q6, metadata, size);
 }
 
+static int pil_lpass_mem_setup_trusted(struct pil_desc *pil, phys_addr_t addr,
+			       size_t size)
+{
+	return pas_mem_setup(PAS_Q6, addr, size);
+}
+
 static int pil_lpass_reset_trusted(struct pil_desc *pil)
 {
+	struct q6v5_data *drv = container_of(pil, struct q6v5_data, desc);
+	int ret;
+
+	ret = clk_prepare_enable(drv->axi_clk);
+	if (ret)
+		return ret;
 	return pas_auth_and_reset(PAS_Q6);
 }
 
 static int pil_lpass_shutdown_trusted(struct pil_desc *pil)
 {
-	return pas_shutdown(PAS_Q6);
+	struct q6v5_data *drv = container_of(pil, struct q6v5_data, desc);
+	int ret;
+
+	ret = pas_shutdown(PAS_Q6);
+	if (ret)
+		return ret;
+	clk_disable_unprepare(drv->axi_clk);
+	return 0;
 }
 
 static struct pil_reset_ops pil_lpass_ops_trusted = {
 	.init_image = pil_lpass_init_image_trusted,
+	.mem_setup = pil_lpass_mem_setup_trusted,
 	.proxy_vote = pil_q6v5_make_proxy_votes,
 	.proxy_unvote = pil_q6v5_remove_proxy_votes,
 	.auth_and_reset = pil_lpass_reset_trusted,
 	.shutdown = pil_lpass_shutdown_trusted,
 };
 
-static int riva_notifier_cb(struct notifier_block *this, unsigned long code,
+static int wcnss_notifier_cb(struct notifier_block *this, unsigned long code,
 								void *ss_handle)
 {
 	int ret;
-	switch (code) {
-	case SUBSYS_BEFORE_SHUTDOWN:
-		pr_debug("%s: R-Notify: Shutdown started\n", __func__);
-		ret = sysmon_send_event(SYSMON_SS_LPASS, "wcnss",
-				SUBSYS_BEFORE_SHUTDOWN);
-		if (ret < 0)
-			pr_err("%s: sysmon_send_event error %d", __func__, ret);
-		break;
-	}
+	pr_debug("%s: W-Notify: event %lu\n", __func__, code);
+	ret = sysmon_send_event(SYSMON_SS_LPASS, "wcnss", code);
+	if (ret < 0)
+		pr_err("%s: sysmon_send_event error %d", __func__, ret);
 	return NOTIFY_DONE;
 }
 
-static struct notifier_block rnb = {
-	.notifier_call = riva_notifier_cb,
+static struct notifier_block wnb = {
+	.notifier_call = wcnss_notifier_cb,
 };
 
 static int modem_notifier_cb(struct notifier_block *this, unsigned long code,
@@ -246,20 +276,19 @@ static void adsp_fatal_fn(struct work_struct *work)
 	restart_adsp(drv);
 }
 
-static void adsp_smsm_state_cb(void *data, uint32_t old_state,
-				uint32_t new_state)
+static irqreturn_t adsp_err_fatal_intr_handler (int irq, void *dev_id)
 {
-	struct lpass_data *drv = data;
+	struct lpass_data *drv = dev_id;
 
-	/* Ignore if we're the one that set SMSM_RESET */
+	/* Ignore if we're the one that set the force stop bit in the outbound
+	 * entry
+	 */
 	if (drv->crash_shutdown)
-		return;
+		return IRQ_HANDLED;
 
-	if (new_state & SMSM_RESET) {
-		pr_err("%s: ADSP SMSM state changed to SMSM_RESET, new_state = %#x, old_state = %#x\n",
-				__func__, new_state, old_state);
-		restart_adsp(drv);
-	}
+	pr_err("Fatal error on the ADSP!\n");
+	restart_adsp(drv);
+	return IRQ_HANDLED;
 }
 
 #define SCM_Q6_NMI_CMD 0x1
@@ -269,6 +298,34 @@ static void send_q6_nmi(void)
 	/* Send NMI to QDSP6 via an SCM call. */
 	scm_call_atomic1(SCM_SVC_UTIL, SCM_Q6_NMI_CMD, 0x1);
 	pr_debug("%s: Q6 NMI was sent.\n", __func__);
+}
+
+/*
+ * The "status" file where a static variable is read from and written to.
+ */
+static ssize_t adsp_state_show(struct kobject *kobj,
+			struct kobj_attribute *attr,
+			char *buf)
+{
+	return snprintf(buf, sizeof(status), "%s\n", status);
+}
+
+static struct kobj_attribute adsp_state_attribute =
+	__ATTR(status, 0444, adsp_state_show, NULL);
+
+static struct attribute *attrs[] = {
+	&adsp_state_attribute.attr,
+	NULL,   /* need to NULL terminate the list of attributes */
+};
+
+static struct attribute_group attr_group = {
+	.attrs = attrs,
+};
+
+static void adsp_set_state(char *state)
+{
+	strlcpy(status, state, sizeof(status));
+	sysfs_notify(lpass_status, NULL, "status");
 }
 
 #define subsys_to_lpass(d) container_of(d, struct lpass_data, subsys_desc)
@@ -283,6 +340,8 @@ static int adsp_shutdown(const struct subsys_desc *subsys)
 	pil_shutdown(&drv->q6->desc);
 	disable_irq_nosync(drv->wdog_irq);
 
+	pr_debug("ADSP is Down\n");
+	adsp_set_state("OFFLINE");
 	return 0;
 }
 
@@ -292,6 +351,9 @@ static int adsp_powerup(const struct subsys_desc *subsys)
 	int ret = 0;
 	ret = pil_boot(&drv->q6->desc);
 	enable_irq(drv->wdog_irq);
+
+	pr_debug("ADSP is back online\n");
+	adsp_set_state("ONLINE");
 	return ret;
 }
 
@@ -310,6 +372,7 @@ static void adsp_crash_shutdown(const struct subsys_desc *subsys)
 	struct lpass_data *drv = subsys_to_lpass(subsys);
 
 	drv->crash_shutdown = 1;
+	gpio_set_value(drv->force_stop_gpio, 1);
 	send_q6_nmi();
 }
 
@@ -341,7 +404,8 @@ static int __devinit pil_lpass_driver_probe(struct platform_device *pdev)
 	struct lpass_data *drv;
 	struct q6v5_data *q6;
 	struct pil_desc *desc;
-	int ret;
+	struct resource *res;
+	int ret, gpio_clk_ready;
 
 	drv = devm_kzalloc(&pdev->dev, sizeof(*drv), GFP_KERNEL);
 	if (!drv)
@@ -352,6 +416,23 @@ static int __devinit pil_lpass_driver_probe(struct platform_device *pdev)
 	if (drv->wdog_irq < 0)
 		return drv->wdog_irq;
 
+	ret = gpio_to_irq(of_get_named_gpio(pdev->dev.of_node,
+					    "qcom,gpio-err-fatal", 0));
+	if (ret < 0)
+		return ret;
+	drv->err_fatal_irq = ret;
+
+	ret = gpio_to_irq(of_get_named_gpio(pdev->dev.of_node,
+					    "qcom,gpio-proxy-unvote", 0));
+	if (ret < 0)
+		return ret;
+	gpio_clk_ready = ret;
+
+	drv->force_stop_gpio = of_get_named_gpio(pdev->dev.of_node,
+						"qcom,gpio-force-stop", 0);
+	if (drv->force_stop_gpio < 0)
+		return drv->force_stop_gpio;
+
 	q6 = pil_q6v5_init(pdev);
 	if (IS_ERR(q6))
 		return PTR_ERR(q6);
@@ -360,6 +441,12 @@ static int __devinit pil_lpass_driver_probe(struct platform_device *pdev)
 	desc = &q6->desc;
 	desc->owner = THIS_MODULE;
 	desc->proxy_timeout = PROXY_TIMEOUT_MS;
+	desc->proxy_unvote_irq = gpio_clk_ready;
+
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "restart_reg");
+	q6->restart_reg = devm_request_and_ioremap(&pdev->dev, res);
+	if (!q6->restart_reg)
+		return -ENOMEM;
 
 	q6->core_clk = devm_clk_get(&pdev->dev, "core_clk");
 	if (IS_ERR(q6->core_clk))
@@ -418,15 +505,17 @@ static int __devinit pil_lpass_driver_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_irq;
 
-	ret = smsm_state_cb_register(SMSM_Q6_STATE, SMSM_RESET,
-			adsp_smsm_state_cb, drv);
-	if (ret < 0)
-		goto err_smsm;
+	ret = devm_request_irq(&pdev->dev, drv->err_fatal_irq,
+				adsp_err_fatal_intr_handler,
+				IRQF_TRIGGER_RISING,
+				dev_name(&pdev->dev), drv);
+	if (ret)
+		goto err_irq;
 
-	drv->riva_notif_hdle = subsys_notif_register_notifier("riva", &rnb);
-	if (IS_ERR(drv->riva_notif_hdle)) {
-		ret = PTR_ERR(drv->riva_notif_hdle);
-		goto err_notif_riva;
+	drv->wcnss_notif_hdle = subsys_notif_register_notifier("wcnss", &wnb);
+	if (IS_ERR(drv->wcnss_notif_hdle)) {
+		ret = PTR_ERR(drv->wcnss_notif_hdle);
+		goto err_notif_wcnss;
 	}
 
 	drv->modem_notif_hdle = subsys_notif_register_notifier("modem", &mnb);
@@ -434,32 +523,46 @@ static int __devinit pil_lpass_driver_probe(struct platform_device *pdev)
 		ret = PTR_ERR(drv->modem_notif_hdle);
 		goto err_notif_modem;
 	}
+	lpass_status = kobject_create_and_add("audio_voice_service",
+						kernel_kobj);
+	if (!lpass_status) {
+		pr_err("%s: kobject create failed\n", __func__);
+		ret = -ENOMEM;
+		goto err_notif_modem;
+	}
+
+	ret = sysfs_create_group(lpass_status, &attr_group);
+	if (ret) {
+		pr_err("%s: sysfs create group failed\n", __func__);
+		goto err_kobj;
+	}
+
+	adsp_set_state("ONLINE");
 	return 0;
+err_kobj:
+	kobject_put(lpass_status);
 err_notif_modem:
-	subsys_notif_unregister_notifier(drv->riva_notif_hdle, &rnb);
-err_notif_riva:
-	smsm_state_cb_deregister(SMSM_Q6_STATE, SMSM_RESET,
-			adsp_smsm_state_cb, drv);
-err_smsm:
+	subsys_notif_unregister_notifier(drv->wcnss_notif_hdle, &wnb);
+err_notif_wcnss:
 err_irq:
 	subsys_unregister(drv->subsys);
 err_subsys:
 	destroy_ramdump_device(drv->ramdump_dev);
 err_ramdump:
 	pil_desc_release(desc);
-	return 0;
+	return ret;
 }
 
 static int __devexit pil_lpass_driver_exit(struct platform_device *pdev)
 {
 	struct lpass_data *drv = platform_get_drvdata(pdev);
-	subsys_notif_unregister_notifier(drv->riva_notif_hdle, &rnb);
+	subsys_notif_unregister_notifier(drv->wcnss_notif_hdle, &wnb);
 	subsys_notif_unregister_notifier(drv->modem_notif_hdle, &mnb);
-	smsm_state_cb_deregister(SMSM_Q6_STATE, SMSM_RESET,
-			adsp_smsm_state_cb, drv);
 	subsys_unregister(drv->subsys);
 	destroy_ramdump_device(drv->ramdump_dev);
 	pil_desc_release(&drv->q6->desc);
+	sysfs_remove_group(lpass_status, &attr_group);
+	kobject_del(lpass_status);
 	return 0;
 }
 

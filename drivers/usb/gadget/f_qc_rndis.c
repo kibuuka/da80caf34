@@ -6,7 +6,7 @@
  * Copyright (C) 2008 Nokia Corporation
  * Copyright (C) 2009 Samsung Electronics
  *			Author: Michal Nazarewicz (mina86@mina86.com)
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2
@@ -421,20 +421,33 @@ static int rndis_qc_bam_setup(void)
 static int rndis_qc_bam_connect(struct f_rndis_qc *dev)
 {
 	int ret;
+	u8 src_connection_idx, dst_connection_idx;
+	struct usb_composite_dev *cdev = dev->port.func.config->cdev;
+	struct usb_gadget *gadget = cdev->gadget;
 
-	dev->bam_port.cdev = dev->port.func.config->cdev;
+	dev->bam_port.cdev = cdev;
+	dev->bam_port.func = &dev->port.func;
 	dev->bam_port.in = dev->port.in_ep;
 	dev->bam_port.out = dev->port.out_ep;
 
 	/* currently we use the first connection */
-	ret = bam_data_connect(&dev->bam_port, 0, 0);
+	src_connection_idx = usb_bam_get_connection_idx(gadget->name, A2_P_BAM,
+		USB_TO_PEER_PERIPHERAL, 0);
+	dst_connection_idx = usb_bam_get_connection_idx(gadget->name, A2_P_BAM,
+		PEER_PERIPHERAL_TO_USB, 0);
+	if (src_connection_idx < 0 || dst_connection_idx < 0) {
+		pr_err("%s: usb_bam_get_connection_idx failed\n", __func__);
+		return ret;
+	}
+	ret = bam_data_connect(&dev->bam_port, 0, USB_GADGET_XPORT_BAM2BAM,
+		src_connection_idx, dst_connection_idx, USB_FUNC_RNDIS);
 	if (ret) {
 		pr_err("bam_data_connect failed: err:%d\n",
 				ret);
 		return ret;
-	} else {
-		pr_info("rndis bam connected\n");
 	}
+
+	pr_info("rndis bam connected\n");
 
 	return 0;
 }
@@ -713,7 +726,7 @@ static int rndis_qc_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 		rndis->port.cdc_filter = 0;
 
 		DBG(cdev, "RNDIS RX/TX early activation ...\n");
-		net = gether_qc_connect_name(&rndis->port, "rndis0");
+		net = gether_qc_connect_name(&rndis->port, "rndis0", false);
 		if (IS_ERR(net))
 			return PTR_ERR(net);
 

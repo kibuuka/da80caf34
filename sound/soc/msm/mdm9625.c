@@ -22,11 +22,12 @@
 #include <sound/soc-dapm.h>
 #include <sound/pcm.h>
 #include <sound/jack.h>
+#include <sound/q6afe-v2.h>
 #include <asm/mach-types.h>
 #include <mach/socinfo.h>
 #include <qdsp6v2/msm-pcm-routing-v2.h>
 #include "../codecs/wcd9320.h"
-
+#include <linux/io.h>
 
 /* Spk control */
 #define MDM9625_SPK_ON 1
@@ -38,9 +39,16 @@
 #define MDM_MCLK_CLK_12P288MHZ 12288000
 #define MDM_MCLK_CLK_9P6HZ 9600000
 #define MDM_IBIT_CLK_DIV_1P56MHZ 7
-#define MDM_MI2S_PRIM_INTF 0
-#define MDM_MI2S_SEC_INTF  1
+#define MDM_MI2S_AUXPCM_PRIM_INTF 0
+#define MDM_MI2S_AUXPCM_SEC_INTF  1
 
+#define LPAIF_OFFSET 0xFE000000
+#define LPAIF_PRI_MODE_MUXSEL (LPAIF_OFFSET + 0x2B000)
+#define LPAIF_SEC_MODE_MUXSEL (LPAIF_OFFSET + 0x2C000)
+
+#define I2S_SEL 0
+#define I2S_PCM_SEL 1
+#define I2S_PCM_SEL_OFFSET 1
 
 /* Machine driver Name*/
 #define MDM9625_MACHINE_DRV_NAME "mdm9625-asoc-taiko"
@@ -56,24 +64,29 @@ struct msm_i2s_ctrl {
 	struct clk *cdc_bit_clk;
 	u32 cnt;
 };
-
-/* MI2S clock */
-struct mdm_mi2s_clk {
-	struct clk *cdc_cr_clk;
-	struct clk *cdc_osr_clk;
-	u32 clk_usrs;
-};
-
 struct mdm9625_machine_data {
 	u32 mclk_freq;
 	struct msm_i2s_gpio *mclk_pin;
 	struct msm_i2s_ctrl *pri_ctrl;
-
+	u32 prim_clk_usrs;
 };
+
+static const struct afe_clk_cfg lpass_default = {
+	AFE_API_VERSION_I2S_CONFIG,
+	Q6AFE_LPASS_IBIT_CLK_1_P536_MHZ,
+	Q6AFE_LPASS_OSR_CLK_12_P288_MHZ,
+	Q6AFE_LPASS_CLK_SRC_INTERNAL,
+	Q6AFE_LPASS_CLK_ROOT_DEFAULT,
+	Q6AFE_LPASS_MODE_BOTH_VALID,
+	0,
+};
+
 
 #define GPIO_NAME_INDEX 0
 #define DT_PARSE_INDEX  1
 
+static int mdm9625_auxpcm_rate = 8000;
+void *lpaif_pri_muxsel_virt_addr;
 
 static char *mdm_i2s_gpio_name[][2] = {
 	 {"PRIM_MI2S_WS",   "prim-i2s-gpio-ws"},
@@ -86,11 +99,11 @@ static char *mdm_mclk_gpio[][2] = {
 	 {"MI2S_MCLK",      "prim-i2s-gpio-mclk"},
 };
 
-static struct mdm_mi2s_clk clk_ctl;
 static struct mutex cdc_mclk_mutex;
 static int mdm9625_mi2s_rx_ch = 1;
 static int mdm9625_mi2s_tx_ch = 1;
 static int msm_spk_control;
+static atomic_t aux_ref_count;
 static atomic_t mi2s_ref_count;
 
 static int mdm9625_enable_codec_ext_clk(struct snd_soc_codec *codec,
@@ -115,7 +128,8 @@ static struct wcd9xxx_mbhc_config mbhc_cfg = {
 #define WCD9XXX_MBHC_DEF_BUTTONS 8
 #define WCD9XXX_MBHC_DEF_RLOADS 5
 
-static int mdm9625_set_mi2s_gpio(struct snd_pcm_substream *substream, u32 intf)
+static int mdm9625_set_gpio(struct snd_pcm_substream *substream,
+			    u32 intf)
 {
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
 	struct snd_soc_card *card = rtd->card;
@@ -132,8 +146,9 @@ static int mdm9625_set_mi2s_gpio(struct snd_pcm_substream *substream, u32 intf)
 		goto err;
 	}
 
-	if (intf == MDM_MI2S_PRIM_INTF)
+	if (intf == MDM_MI2S_AUXPCM_PRIM_INTF) {
 		i2s_ctrl = pdata->pri_ctrl;
+	}
 	else {
 		pr_err("%s: Wrong I2S Interface\n", __func__);
 		rtn = -EINVAL;
@@ -184,8 +199,9 @@ static int mdm9625_mi2s_free_gpios(struct snd_pcm_substream *substream,
 		rtn = -EINVAL;
 		goto err;
 	}
-	if (intf == MDM_MI2S_PRIM_INTF)
+	if (intf == MDM_MI2S_AUXPCM_PRIM_INTF) {
 		i2s_ctrl = pdata->pri_ctrl;
+	}
 	else {
 		pr_debug("%s: Wrong Interface\n", __func__);
 		rtn = -EINVAL;
@@ -209,63 +225,51 @@ err:
 }
 static int mdm9625_mi2s_clk_ctl(struct snd_soc_pcm_runtime *rtd, bool enable)
 {
-	struct mdm_mi2s_clk *clk = &clk_ctl;
-	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
 	struct snd_soc_card *card = rtd->card;
-	struct clk *bclk = NULL;
 	struct mdm9625_machine_data *pdata = snd_soc_card_get_drvdata(card);
+	struct afe_clk_cfg *lpass_clk = NULL;
 	int ret = 0;
 
 	if (pdata == NULL) {
 		pr_err("%s:platform data is null\n", __func__);
-		return -ENODEV;
+		return -ENOMEM;
 	}
-	bclk = pdata->pri_ctrl->cdc_bit_clk;
-
+	lpass_clk = kzalloc(sizeof(struct afe_clk_cfg), GFP_KERNEL);
+	if (lpass_clk == NULL) {
+		pr_err("%s:Failed to allocate memory\n", __func__);
+			return -ENOMEM;
+	}
+	memcpy(lpass_clk, &lpass_default, sizeof(struct afe_clk_cfg));
+	pr_debug("%s:enable = %x\n", __func__, enable);
 	if (enable) {
-		if (clk->clk_usrs == 0) {
-			/* Set rate core and ibit clock */
-			clk_set_rate(clk->cdc_cr_clk, pdata->mclk_freq);
-			/* Enable clocks. core clock need not be enabled.
-			 * Enabling branch clocks indirectly enables
-			 * core clock.
-			 */
-			ret = clk_prepare_enable(clk->cdc_osr_clk);
-			if (ret != 0) {
-				pr_err("Fail to enable cdc_osr_clk\n");
-				goto exit_osrclk_err;
-			}
-		}
-		clk->clk_usrs++;
-		/* ibit clock */
-		bclk = clk_get(cpu_dai->dev, "ibit_clk");
-		if (IS_ERR(bclk)) {
-			pr_err("%s: Failed to request Bit %ld\n"
-			       "CPU dai name %s\n", __func__,
-			       PTR_ERR(bclk),
-			       cpu_dai->dev->driver->name);
-			return -ENODEV ;
-		}
-		clk_set_rate(bclk, MDM_IBIT_CLK_DIV_1P56MHZ);
-		ret = clk_prepare_enable(bclk);
-		if (ret != 0) {
-			pr_err("Fail to enable cdc_bit_clk\n");
-			goto exit_bclk_err;
-		}
-		return ret;
+		if (pdata->prim_clk_usrs == 0) {
+			lpass_clk->clk_val2 = pdata->mclk_freq;
+			lpass_clk->clk_set_mode = Q6AFE_LPASS_MODE_BOTH_VALID;
+		} else
+			lpass_clk->clk_set_mode = Q6AFE_LPASS_MODE_CLK1_VALID;
+		ret = afe_set_lpass_clock(MI2S_RX, lpass_clk);
+		if (ret < 0)
+			pr_err("%s:afe_set_lpass_clock failed\n", __func__);
+		else
+			pdata->prim_clk_usrs++;
 	} else {
-		if (clk->clk_usrs > 0)
-			clk->clk_usrs--;
-		ret = 0;
-		goto exit_bclk_err;
+		if (pdata->prim_clk_usrs > 0)
+			pdata->prim_clk_usrs--;
+		if (pdata->prim_clk_usrs == 0) {
+			lpass_clk->clk_val2 = Q6AFE_LPASS_OSR_CLK_DISABLE;
+			lpass_clk->clk_set_mode = Q6AFE_LPASS_MODE_BOTH_VALID;
+		} else
+			lpass_clk->clk_set_mode = Q6AFE_LPASS_MODE_CLK1_VALID;
+		lpass_clk->clk_val1 = Q6AFE_LPASS_IBIT_CLK_DISABLE;
+		ret = afe_set_lpass_clock(MI2S_RX, lpass_clk);
+		if (ret < 0)
+			pr_err("%s:afe_set_lpass_clock failed\n", __func__);
 	}
-exit_bclk_err:
-	clk_disable_unprepare(bclk);
-	clk_put(bclk);
-exit_osrclk_err:
-	if (clk->clk_usrs == 0)
-		clk_disable_unprepare(clk->cdc_osr_clk);
-	bclk = NULL;
+	pr_debug("%s: clk 1 = %x clk2 = %x mode = %x\n",
+			__func__, lpass_clk->clk_val1,
+			lpass_clk->clk_val2,
+			lpass_clk->clk_set_mode);
+	kfree(lpass_clk);
 	return ret;
 }
 
@@ -274,7 +278,7 @@ static void mdm9625_mi2s_snd_shutdown(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
 	int ret;
 	if (atomic_dec_return(&mi2s_ref_count) == 0) {
-		mdm9625_mi2s_free_gpios(substream, MDM_MI2S_PRIM_INTF);
+		mdm9625_mi2s_free_gpios(substream, MDM_MI2S_AUXPCM_PRIM_INTF);
 		ret = mdm9625_mi2s_clk_ctl(rtd, false);
 		if (ret < 0)
 			pr_err("%s:clock disable failed\n", __func__);
@@ -289,24 +293,34 @@ static int mdm9625_mi2s_startup(struct snd_pcm_substream *substream)
 	int ret = 0;
 
 	if (atomic_inc_return(&mi2s_ref_count) == 1) {
-		mdm9625_set_mi2s_gpio(substream, MDM_MI2S_PRIM_INTF);
+		if (lpaif_pri_muxsel_virt_addr != NULL)
+			iowrite32(I2S_SEL << I2S_PCM_SEL_OFFSET,
+				  lpaif_pri_muxsel_virt_addr);
+		else
+			pr_err("%s lpaif_pri_muxsel_virt_addr is NULL\n",
+				__func__);
+		ret = mdm9625_set_gpio(substream, MDM_MI2S_AUXPCM_PRIM_INTF);
+		if (ret < 0) {
+			pr_err("%s, GPIO setup failed\n", __func__);
+			return ret;
+		}
 		ret = mdm9625_mi2s_clk_ctl(rtd, true);
 		if (ret < 0) {
 			pr_err("set format for codec dai failed\n");
 			return ret;
 		}
-	}
-	/* This sets the CONFIG PARAMETER WS_SRC.
-	 * 1 means internal clock master mode.
-	 * 0 means external clock slave mode.
-	 */
-	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_CBS_CFS);
-	if (ret < 0)
-		pr_err("set fmt cpu dai failed\n");
+		/* This sets the CONFIG PARAMETER WS_SRC.
+		 * 1 means internal clock master mode.
+		 * 0 means external clock slave mode.
+		 */
+		ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_CBS_CFS);
+		if (ret < 0)
+			pr_err("set fmt cpu dai failed\n");
 
-	ret = snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_CBS_CFS);
-	if (ret < 0)
-		pr_err("set fmt for codec dai failed\n");
+		ret = snd_soc_dai_set_fmt(codec_dai, SND_SOC_DAIFMT_CBS_CFS);
+		if (ret < 0)
+			pr_err("set fmt for codec dai failed\n");
+	}
 
 	return ret;
 }
@@ -419,35 +433,51 @@ static int mdm9625_enable_codec_ext_clk(struct snd_soc_codec *codec,
 	int ret = 0;
 	struct mdm9625_machine_data *pdata =
 			snd_soc_card_get_drvdata(codec->card);
-	struct mdm_mi2s_clk *clk = &clk_ctl;
+	struct afe_clk_cfg *lpass_clk = NULL;
 
-	pr_debug("%s: enable = %d  codec name %s\n", __func__,
-		 enable, codec->name);
+	pr_debug("%s: enable = %d  codec name %s enable %x\n",
+		   __func__, enable, codec->name, enable);
+	lpass_clk = kzalloc(sizeof(struct afe_clk_cfg), GFP_KERNEL);
+	if (lpass_clk == NULL) {
+		pr_err("%s:Failed to allocate memory\n", __func__);
+		return -ENOMEM;
+	}
 	mutex_lock(&cdc_mclk_mutex);
-
+	memcpy(lpass_clk, &lpass_default, sizeof(struct afe_clk_cfg));
 	if (enable) {
-		if (clk->clk_usrs == 0) {
-			/* Set rate core and ibit clock */
-			clk_set_rate(clk->cdc_cr_clk, pdata->mclk_freq);
-			/* Enable clocks. core clock need not be enabled.
-			 * Enabling branch clocks indirectly enables
-			 * core clock.
-			 */
-			ret = clk_prepare_enable(clk->cdc_osr_clk);
-			if (ret != 0)
-				pr_err("Fail to enable cdc_osr_clk\n");
+		if (pdata->prim_clk_usrs == 0) {
+			lpass_clk->clk_val2 = pdata->mclk_freq;
+			lpass_clk->clk_set_mode = Q6AFE_LPASS_MODE_CLK2_VALID;
+			ret = afe_set_lpass_clock(MI2S_RX, lpass_clk);
+			if (ret < 0) {
+				pr_err("%s:afe_set_lpass_clock failed\n",
+				       __func__);
+				goto err;
+			}
 		}
-		clk->clk_usrs++;
+		pdata->prim_clk_usrs++;
 		taiko_mclk_enable(codec, 1, dapm);
-
 	} else {
-		if (clk->clk_usrs > 0)
-			clk->clk_usrs--;
-		if (clk->clk_usrs == 0)
-			clk_disable_unprepare(clk->cdc_osr_clk);
+		if (pdata->prim_clk_usrs > 0)
+			pdata->prim_clk_usrs--;
+		if (pdata->prim_clk_usrs == 0) {
+			lpass_clk->clk_set_mode = Q6AFE_LPASS_MODE_CLK2_VALID;
+			lpass_clk->clk_val2 = Q6AFE_LPASS_OSR_CLK_DISABLE;
+			ret = afe_set_lpass_clock(MI2S_RX, lpass_clk);
+			if (ret < 0) {
+				pr_err("%s:afe_set_lpass_clock failed\n",
+				       __func__);
+				goto err;
+			}
+		}
 		taiko_mclk_enable(codec, 0, dapm);
 	}
+	pr_debug("%s: clk2 = %x mode = %x\n",
+			 __func__, lpass_clk->clk_val2,
+			 lpass_clk->clk_set_mode);
+err:
 	mutex_unlock(&cdc_mclk_mutex);
+	kfree(lpass_clk);
 	return ret;
 }
 
@@ -464,6 +494,83 @@ static int mdm9625_mclk_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
+static int mdm9625_auxpcm_startup(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	int ret = 0;
+
+	if (atomic_inc_return(&aux_ref_count) == 1) {
+		if (lpaif_pri_muxsel_virt_addr != NULL)
+			iowrite32(I2S_PCM_SEL << I2S_PCM_SEL_OFFSET,
+				  lpaif_pri_muxsel_virt_addr);
+		else
+			pr_err("%s lpaif_pri_muxsel_virt_addr is NULL\n",
+				__func__);
+		ret = mdm9625_set_gpio(substream, MDM_MI2S_AUXPCM_PRIM_INTF);
+		if (ret < 0) {
+			pr_err("%s, GPIO setup failed\n", __func__);
+			return ret;
+		}
+		ret = mdm9625_mi2s_clk_ctl(rtd, true);
+		if (ret < 0) {
+			pr_err("set format for codec dai failed\n");
+			return ret;
+		}
+	}
+	return ret;
+}
+
+static void mdm9625_auxpcm_snd_shutdown(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	int ret;
+
+	if (atomic_dec_return(&aux_ref_count) == 0) {
+		mdm9625_mi2s_free_gpios(substream, MDM_MI2S_AUXPCM_PRIM_INTF);
+		ret = mdm9625_mi2s_clk_ctl(rtd, false);
+		if (ret < 0)
+			pr_err("%s:clock disable failed\n", __func__);
+	}
+}
+
+static int mdm9625_auxpcm_rate_get(struct snd_kcontrol *kcontrol,
+				   struct snd_ctl_elem_value *ucontrol)
+{
+	ucontrol->value.integer.value[0] = mdm9625_auxpcm_rate;
+	return 0;
+}
+
+static int mdm9625_auxpcm_rate_put(struct snd_kcontrol *kcontrol,
+				   struct snd_ctl_elem_value *ucontrol)
+{
+	switch (ucontrol->value.integer.value[0]) {
+	case 0:
+		mdm9625_auxpcm_rate = 8000;
+		break;
+	case 1:
+		mdm9625_auxpcm_rate = 16000;
+		break;
+	default:
+		mdm9625_auxpcm_rate = 8000;
+		break;
+	}
+	return 0;
+}
+
+static int mdm9625_auxpcm_be_params_fixup(struct snd_soc_pcm_runtime *rtd,
+					  struct snd_pcm_hw_params *params)
+{
+	struct snd_interval *rate =
+		hw_param_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+
+	struct snd_interval *channels =
+		hw_param_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
+
+	rate->min = rate->max = mdm9625_auxpcm_rate;
+	channels->min = channels->max = 1;
+
+	return 0;
+}
 
 static const struct snd_soc_dapm_widget mdm9625_dapm_widgets[] = {
 
@@ -488,56 +595,29 @@ static const struct snd_soc_dapm_widget mdm9625_dapm_widgets[] = {
 static const char *const spk_function[] = {"Off", "On"};
 static const char *const mi2s_rx_ch_text[] = {"One", "Two"};
 static const char *const mi2s_tx_ch_text[] = {"One", "Two"};
+static const char *const auxpcm_rate_text[] = {"rate_8000", "rate_16000"};
 
 static const struct soc_enum mdm9625_enum[] = {
 	SOC_ENUM_SINGLE_EXT(2, spk_function),
 	SOC_ENUM_SINGLE_EXT(2, mi2s_rx_ch_text),
 	SOC_ENUM_SINGLE_EXT(2, mi2s_tx_ch_text),
+	SOC_ENUM_SINGLE_EXT(2, auxpcm_rate_text),
 };
 
 static const struct snd_kcontrol_new mdm_snd_controls[] = {
-	SOC_ENUM_EXT("Speaker Function", mdm9625_enum[0],
+	SOC_ENUM_EXT("Speaker Function",   mdm9625_enum[0],
 				 mdm9625_mi2s_get_spk,
 				 mdm9625_mi2s_set_spk),
-	SOC_ENUM_EXT("MI2S_RX Channels", mdm9625_enum[1],
+	SOC_ENUM_EXT("MI2S_RX Channels",   mdm9625_enum[1],
 				 mdm9625_mi2s_rx_ch_get,
 				 mdm9625_mi2s_rx_ch_put),
-	SOC_ENUM_EXT("MI2S_TX Channels", mdm9625_enum[2],
+	SOC_ENUM_EXT("MI2S_TX Channels",   mdm9625_enum[2],
 				 mdm9625_mi2s_tx_ch_get,
 				 mdm9625_mi2s_tx_ch_put),
+	SOC_ENUM_EXT("AUX PCM SampleRate", mdm9625_enum[3],
+				 mdm9625_auxpcm_rate_get,
+				 mdm9625_auxpcm_rate_put),
 };
-
-static int msm9625_set_codec_mclk(struct snd_soc_pcm_runtime *rtd, bool enable)
-{
-	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
-	struct mdm_mi2s_clk *clk = &clk_ctl;
-	int ret = 0;
-
-	if (clk->clk_usrs == 0) {
-		clk->cdc_cr_clk = clk_get(cpu_dai->dev, "core_clk");
-		if (IS_ERR(clk->cdc_cr_clk)) {
-			pr_err("%s: Failed to Core clk %ld\n"
-			       "CPU dai name %s\n", __func__,
-			       PTR_ERR(clk->cdc_cr_clk),
-			       cpu_dai->dev->driver->name);
-			return -ENODEV ;
-		}
-		/* osr clock */
-		clk->cdc_osr_clk = clk_get(cpu_dai->dev, "osr_clk");
-		if (IS_ERR(clk->cdc_osr_clk)) {
-			pr_err("%s: Failed to request OSR %ld\n"
-			       "CPU dai name %s\n", __func__,
-			       PTR_ERR(clk->cdc_osr_clk),
-			       cpu_dai->dev->driver->name);
-			clk_put(clk->cdc_cr_clk);
-			return -ENODEV ;
-		}
-	} else {
-		pr_err("%s: Failed to get MCLK\n", __func__);
-		ret = -ENODEV ;
-	}
-	return ret;
-}
 
 static int mdm9625_mi2s_audrx_init(struct snd_soc_pcm_runtime *rtd)
 {
@@ -565,10 +645,6 @@ static int mdm9625_mi2s_audrx_init(struct snd_soc_pcm_runtime *rtd)
 	snd_soc_dapm_enable_pin(dapm, "Ext Spk Top Neg");
 	snd_soc_dapm_sync(dapm);
 
-	/* start mbhc */
-	err = msm9625_set_codec_mclk(rtd, true);
-	if (err < 0)
-		return err;
 	mbhc_cfg.calibration = def_taiko_mbhc_cal();
 	if (mbhc_cfg.calibration)
 		err = taiko_hs_detect(codec, &mbhc_cfg);
@@ -661,6 +737,11 @@ static struct snd_soc_ops mdm9625_mi2s_be_ops = {
 	.shutdown = mdm9625_mi2s_snd_shutdown,
 };
 
+static struct snd_soc_ops mdm9625_auxpcm_be_ops = {
+	.startup = mdm9625_auxpcm_startup,
+	.shutdown = mdm9625_auxpcm_snd_shutdown,
+};
+
 /* Digital audio interface connects codec <---> CPU */
 static struct snd_soc_dai_link mdm9625_dai[] = {
 	/* FrontEnd DAI Links */
@@ -668,7 +749,7 @@ static struct snd_soc_dai_link mdm9625_dai[] = {
 		.name = "MDM9625 Media1",
 		.stream_name = "MultiMedia1",
 		.cpu_dai_name = "MultiMedia1",
-		.platform_name  = "msm-pcm-dsp",
+		.platform_name  = "msm-pcm-dsp.0",
 		.dynamic = 1,
 		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
 			    SND_SOC_DPCM_TRIGGER_POST},
@@ -678,6 +759,21 @@ static struct snd_soc_dai_link mdm9625_dai[] = {
 		/* This dainlink has playback support */
 		.ignore_pmdown_time = 1,
 		.be_id = MSM_FRONTEND_DAI_MULTIMEDIA1
+	},
+	{
+		.name = "MDM9625 Media2",
+		.stream_name = "MultiMedia2",
+		.cpu_dai_name   = "MultiMedia2",
+		.platform_name  = "msm-pcm-dsp.0",
+		.dynamic = 1,
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			    SND_SOC_DPCM_TRIGGER_POST},
+		.ignore_suspend = 1,
+		/* this dainlink has playback support */
+		.ignore_pmdown_time = 1,
+		.be_id = MSM_FRONTEND_DAI_MULTIMEDIA2,
 	},
 	{
 		.name = "MSM VoIP",
@@ -725,6 +821,64 @@ static struct snd_soc_dai_link mdm9625_dai[] = {
 		.codec_dai_name = "snd-soc-dummy-dai",
 		.codec_name = "snd-soc-dummy",
 	},
+	{
+		.name = "VoLTE",
+		.stream_name = "VoLTE",
+		.cpu_dai_name   = "VoLTE",
+		.platform_name  = "msm-pcm-voice",
+		.dynamic = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			    SND_SOC_DPCM_TRIGGER_POST},
+		.no_host_mode = SND_SOC_DAI_LINK_NO_HOST,
+		.ignore_suspend = 1,
+		/* this dainlink has playback support */
+		.ignore_pmdown_time = 1,
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.be_id = MSM_FRONTEND_DAI_VOLTE,
+	},
+	{	.name = "MSM AFE-PCM RX",
+		.stream_name = "AFE-PROXY RX",
+		.cpu_dai_name = "msm-dai-q6-dev.241",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-rx",
+		.platform_name  = "msm-pcm-afe",
+		.ignore_suspend = 1,
+		/* this dainlink has playback support */
+		.ignore_pmdown_time = 1,
+	},
+	{
+		.name = "MSM AFE-PCM TX",
+		.stream_name = "AFE-PROXY TX",
+		.cpu_dai_name = "msm-dai-q6-dev.240",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-tx",
+		.platform_name  = "msm-pcm-afe",
+		.ignore_suspend = 1,
+	},
+	{
+		.name = "DTMF RX Hostless",
+		.stream_name = "DTMF RX Hostless",
+		.cpu_dai_name	= "DTMF_RX_HOSTLESS",
+		.platform_name	= "msm-pcm-dtmf",
+		.dynamic = 1,
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+				SND_SOC_DPCM_TRIGGER_POST},
+		.ignore_suspend = 1,
+		.be_id = MSM_FRONTEND_DAI_DTMF_RX,
+		.no_host_mode = SND_SOC_DAI_LINK_NO_HOST,
+	},
+	{
+		.name = "DTMF TX",
+		.stream_name = "DTMF TX",
+		.cpu_dai_name = "msm-dai-stub",
+		.platform_name = "msm-pcm-dtmf",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-tx",
+		.ignore_suspend = 1,
+	},
 	/* Backend DAI Links */
 	{
 		.name = LPASS_BE_MI2S_RX,
@@ -751,6 +905,52 @@ static struct snd_soc_dai_link mdm9625_dai[] = {
 		.be_hw_params_fixup = &mdm9625_mi2s_tx_be_hw_params_fixup,
 		.ops = &mdm9625_mi2s_be_ops,
 	},
+	{
+		.name = LPASS_BE_AFE_PCM_RX,
+		.stream_name = "AFE Playback",
+		.cpu_dai_name = "msm-dai-q6-dev.224",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-rx",
+		.no_pcm = 1,
+		.be_id = MSM_BACKEND_DAI_AFE_PCM_RX,
+	},
+	{
+		.name = LPASS_BE_AFE_PCM_TX,
+		.stream_name = "AFE Capture",
+		.cpu_dai_name = "msm-dai-q6-dev.225",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-tx",
+		.no_pcm = 1,
+		.be_id = MSM_BACKEND_DAI_AFE_PCM_TX,
+	},
+	{
+		.name = LPASS_BE_AUXPCM_RX,
+		.stream_name = "AUX PCM Playback",
+		.cpu_dai_name = "msm-dai-q6.4106",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-rx",
+		.no_pcm = 1,
+		.be_id = MSM_BACKEND_DAI_AUXPCM_RX,
+		.be_hw_params_fixup = mdm9625_auxpcm_be_params_fixup,
+		.ops = &mdm9625_auxpcm_be_ops,
+		.ignore_pmdown_time = 1,
+		/* this dainlink has playback support */
+	},
+	{
+		.name = LPASS_BE_AUXPCM_TX,
+		.stream_name = "AUX PCM Capture",
+		.cpu_dai_name = "msm-dai-q6.4107",
+		.platform_name = "msm-pcm-routing",
+		.codec_name = "msm-stub-codec.1",
+		.codec_dai_name = "msm-stub-tx",
+		.no_pcm = 1,
+		.be_id = MSM_BACKEND_DAI_AUXPCM_TX,
+		.be_hw_params_fixup = mdm9625_auxpcm_be_params_fixup,
+		.ops = &mdm9625_auxpcm_be_ops,
+	},
 };
 
 static struct snd_soc_card snd_soc_card_mdm9625 = {
@@ -759,7 +959,7 @@ static struct snd_soc_card snd_soc_card_mdm9625 = {
 	.num_links = ARRAY_SIZE(mdm9625_dai),
 };
 
-static int mdm9625_dtparse_mi2s(struct platform_device *pdev,
+static int mdm9625_dtparse(struct platform_device *pdev,
 				struct mdm9625_machine_data **pdata)
 {
 	int ret = 0, i = 0;
@@ -851,11 +1051,16 @@ static __devinit int mdm9625_asoc_machine_probe(struct platform_device *pdev)
 {
 	int ret;
 	struct snd_soc_card *card = &snd_soc_card_mdm9625;
-	struct mdm_mi2s_clk *clk = &clk_ctl;
 	struct mdm9625_machine_data *pdata;
+	enum apr_subsys_state q6_state;
 
+	q6_state = apr_get_q6_state();
+	if (q6_state != APR_SUBSYS_LOADED) {
+		dev_dbg(&pdev->dev, "defering %s, adsp_state %d\n",
+				__func__, q6_state);
+		return -EPROBE_DEFER;
+	}
 	mutex_init(&cdc_mclk_mutex);
-	clk->clk_usrs = 0;
 	if (!pdev->dev.of_node) {
 		dev_err(&pdev->dev, "No platform supplied from device tree\n");
 		return -EINVAL;
@@ -867,10 +1072,10 @@ static __devinit int mdm9625_asoc_machine_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto err;
 	}
-	ret = mdm9625_dtparse_mi2s(pdev, &pdata);
+	ret = mdm9625_dtparse(pdev, &pdata);
 	if (ret) {
 		dev_err(&pdev->dev,
-			"%s: mi2s Pin data parse failed",
+			"%s: mi2s-aux Pin data parse failed",
 			__func__);
 		goto err;
 	}
@@ -885,12 +1090,13 @@ static __devinit int mdm9625_asoc_machine_probe(struct platform_device *pdev)
 		goto err;
 	}
 	/* At present only 12.288MHz is supported on MDM. */
-	if (pdata->mclk_freq != MDM_MCLK_CLK_12P288MHZ) {
+	if (q6afe_check_osr_clk_freq(pdata->mclk_freq)) {
 		dev_err(&pdev->dev, "unsupported taiko mclk freq %u\n",
 			pdata->mclk_freq);
 		ret = -EINVAL;
 		goto err;
 	}
+	pdata->prim_clk_usrs = 0;
 	card->dev = &pdev->dev;
 	platform_set_drvdata(pdev, card);
 	snd_soc_card_set_drvdata(card, pdata);
@@ -906,6 +1112,14 @@ static __devinit int mdm9625_asoc_machine_probe(struct platform_device *pdev)
 				ret);
 		goto err;
 	}
+
+	lpaif_pri_muxsel_virt_addr = ioremap(LPAIF_PRI_MODE_MUXSEL, 4);
+	if (lpaif_pri_muxsel_virt_addr == NULL) {
+		pr_err("%s Pri muxsel virt addr is null\n", __func__);
+		ret = -EINVAL;
+		goto err;
+	}
+
 	return 0;
 err:
 	devm_kfree(&pdev->dev, pdata);

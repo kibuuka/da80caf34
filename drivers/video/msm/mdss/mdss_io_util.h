@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -50,10 +50,9 @@ enum dss_vreg_type {
 struct dss_vreg {
 	struct regulator *vreg; /* vreg handle */
 	char vreg_name[32];
-	enum dss_vreg_type type;
 	int min_voltage;
 	int max_voltage;
-	int optimum_voltage;
+	int peak_current;
 };
 
 struct dss_gpio {

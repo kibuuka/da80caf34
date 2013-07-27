@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,7 +10,7 @@
  * GNU General Public License for more details.
  */
 
-/ {
+&soc {
 	qcom,ion {
 		compatible = "qcom,msm-ion";
 		#address-cells = <1>;
@@ -20,38 +20,32 @@
 			reg = <30>;
 		};
 
+		qcom,ion-heap@21 { /* SYSTEM CONTIG HEAP */
+			reg = <21>;
+		};
+
 		qcom,ion-heap@8 { /* CP_MM HEAP */
 			compatible = "qcom,msm-ion-reserve";
 			reg = <8>;
 			qcom,heap-align = <0x1000>;
-			qcom,memory-reservation-type = "EBI1"; /* reserve EBI memory */
-			qcom,memory-reservation-size = <0x7800000>;
+			linux,contiguous-region = <&secure_mem>;
 		};
 
-		qcom,ion-heap@23 { /* PIL1 HEAP */
+		qcom,ion-heap@22 { /* adsp heap */
 			compatible = "qcom,msm-ion-reserve";
-			reg = <23>;
-			qcom,heap-align = <0x10000>;
-			qcom,memory-fixed = <0xd200000 0x2800000>;
+			reg = <22>;
+			qcom,heap-align = <0x1000>;
+			linux,contiguous-region = <&adsp_mem>;
 		};
 
 		qcom,ion-heap@25 { /* IOMMU HEAP */
 			reg = <25>;
 		};
 
-		qcom,ion-heap@26 { /* PIL2 HEAP */
-			compatible = "qcom,msm-ion-reserve";
-			reg = <26>;
-			qcom,heap-align = <0x10000>;
-			qcom,memory-fixed = <0x8400000 0x4e00000>;
-		};
-
 		qcom,ion-heap@27 { /* QSECOM HEAP */
 			compatible = "qcom,msm-ion-reserve";
 			reg = <27>;
-			qcom,heap-align = <0x1000>;
-			qcom,memory-reservation-type = "EBI1"; /* reserve EBI memory */
-			qcom,memory-reservation-size = <0x780000>;
+			linux,contiguous-region = <&qsecom_mem>;
 		};
 
 		qcom,ion-heap@28 { /* AUDIO HEAP */
@@ -59,7 +53,7 @@
 			reg = <28>;
 			qcom,heap-align = <0x1000>;
 			qcom,memory-reservation-type = "EBI1"; /* reserve EBI memory */
-			qcom,memory-reservation-size = <0x314000>;
+			qcom,memory-reservation-size = <0x614000>;
 		};
 	};
 };

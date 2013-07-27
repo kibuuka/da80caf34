@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -51,14 +51,17 @@ struct mdss_iommu_map_type {
 	int domain_idx;
 };
 
+struct mdss_hw_settings {
+	char __iomem *reg;
+	u32 val;
+};
+
 struct mdss_data_type {
-	u32 rev;
 	u32 mdp_rev;
 	struct clk *mdp_clk[MDSS_MAX_CLK];
 	struct regulator *fs;
+	u32 max_mdp_clk_rate;
 
-	struct workqueue_struct *clk_ctrl_wq;
-	struct delayed_work clk_ctrl_worker;
 	struct platform_device *pdev;
 	char __iomem *mdp_base;
 	size_t mdp_reg_size;
@@ -68,26 +71,48 @@ struct mdss_data_type {
 	u32 irq_mask;
 	u32 irq_ena;
 	u32 irq_buzy;
+	u32 has_bwc;
+	u32 has_decimation;
 
 	u32 mdp_irq_mask;
 	u32 mdp_hist_irq_mask;
 
-	u32 suspend;
-	u32 timeout;
-
+	int suspend_fs_ena;
 	u8 clk_ena;
 	u8 fs_ena;
 	u8 vsync_ena;
-	u8 eintf_ena;
+	unsigned long min_mdp_clk;
 
-	u32 prim_ptype;
 	u32 res_init;
 	u32 bus_hdl;
 
 	u32 smp_mb_cnt;
 	u32 smp_mb_size;
-	u32 *pipe_type_map;
-	u32 *mixer_type_map;
+
+	u32 rot_block_size;
+
+	struct mdss_hw_settings *hw_settings;
+
+	struct mdss_mdp_pipe *vig_pipes;
+	struct mdss_mdp_pipe *rgb_pipes;
+	struct mdss_mdp_pipe *dma_pipes;
+	u32 nvig_pipes;
+	u32 nrgb_pipes;
+	u32 ndma_pipes;
+	struct mdss_mdp_mixer *mixer_intf;
+	struct mdss_mdp_mixer *mixer_wb;
+	u32 nmixers_intf;
+	u32 nmixers_wb;
+	struct mdss_mdp_ctl *ctl_off;
+	u32 nctl;
+	struct mdss_mdp_dp_intf *dp_off;
+	u32 ndp;
+	void *video_intf;
+	u32 nintf;
+
+	struct mdss_ad_info *ad_cfgs;
+	u32 nad_cfgs;
+	struct workqueue_struct *ad_calc_wq;
 
 	struct ion_client *iclient;
 	int iommu_attached;
@@ -113,6 +138,7 @@ struct mdss_hw {
 	irqreturn_t (*irq_handler)(int irq, void *ptr);
 };
 
+int mdss_register_irq(struct mdss_hw *hw);
 void mdss_enable_irq(struct mdss_hw *hw);
 void mdss_disable_irq(struct mdss_hw *hw);
 void mdss_disable_irq_nosync(struct mdss_hw *hw);

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  *
  * This software is licensed under the terms of the GNU General Public
@@ -28,17 +28,11 @@
 #define MSM8226_QGIC_DIST_PHYS	0xF9000000
 #define MSM8226_QGIC_DIST_SIZE	SZ_4K
 
-#define MSM8226_QGIC_CPU_PHYS	0xF9002000
-#define MSM8226_QGIC_CPU_SIZE	SZ_4K
-
 #define MSM8226_APCS_GCC_PHYS	0xF9011000
 #define MSM8226_APCS_GCC_SIZE	SZ_4K
 
 #define MSM8226_TLMM_PHYS	0xFD510000
 #define MSM8226_TLMM_SIZE	SZ_16K
-
-#define MSM8226_IMEM_PHYS	0xFE805000
-#define MSM8226_IMEM_SIZE	SZ_4K
 
 #define MSM8226_MPM2_PSHOLD_PHYS	0xFC4AB000
 #define MSM8226_MPM2_PSHOLD_SIZE	SZ_4K

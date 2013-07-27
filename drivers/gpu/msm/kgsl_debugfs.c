@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2008-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2002,2008-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -70,6 +70,20 @@ static int pm_ib_enabled_get(void *data, u64 *val)
 	return 0;
 }
 
+static int pm_enabled_set(void *data, u64 val)
+{
+	struct kgsl_device *device = data;
+	device->pm_dump_enable = val;
+	return 0;
+}
+
+static int pm_enabled_get(void *data, u64 *val)
+{
+	struct kgsl_device *device = data;
+	*val = device->pm_dump_enable;
+	return 0;
+}
+
 
 DEFINE_SIMPLE_ATTRIBUTE(pm_regs_enabled_fops,
 			pm_regs_enabled_get,
@@ -78,6 +92,10 @@ DEFINE_SIMPLE_ATTRIBUTE(pm_regs_enabled_fops,
 DEFINE_SIMPLE_ATTRIBUTE(pm_ib_enabled_fops,
 			pm_ib_enabled_get,
 			pm_ib_enabled_set, "%llu\n");
+
+DEFINE_SIMPLE_ATTRIBUTE(pm_enabled_fops,
+			pm_enabled_get,
+			pm_enabled_set, "%llu\n");
 
 static inline int kgsl_log_set(unsigned int *log_val, void *data, u64 val)
 {
@@ -105,6 +123,7 @@ KGSL_DEBUGFS_LOG(cmd_log);
 KGSL_DEBUGFS_LOG(ctxt_log);
 KGSL_DEBUGFS_LOG(mem_log);
 KGSL_DEBUGFS_LOG(pwr_log);
+KGSL_DEBUGFS_LOG(ft_log);
 
 static int memfree_hist_print(struct seq_file *s, void *unused)
 {
@@ -166,6 +185,7 @@ void kgsl_device_debugfs_init(struct kgsl_device *device)
 	device->drv_log = KGSL_LOG_LEVEL_DEFAULT;
 	device->mem_log = KGSL_LOG_LEVEL_DEFAULT;
 	device->pwr_log = KGSL_LOG_LEVEL_DEFAULT;
+	device->ft_log = KGSL_LOG_LEVEL_DEFAULT;
 
 	debugfs_create_file("log_level_cmd", 0644, device->d_debugfs, device,
 			    &cmd_log_fops);
@@ -179,6 +199,8 @@ void kgsl_device_debugfs_init(struct kgsl_device *device)
 				&pwr_log_fops);
 	debugfs_create_file("memfree_history", 0444, device->d_debugfs, device,
 				&memfree_hist_fops);
+	debugfs_create_file("log_level_ft", 0644, device->d_debugfs, device,
+				&ft_log_fops);
 
 	/* Create postmortem dump control files */
 
@@ -193,6 +215,9 @@ void kgsl_device_debugfs_init(struct kgsl_device *device)
 			    &pm_regs_enabled_fops);
 	debugfs_create_file("ib_enabled", 0644, pm_d_debugfs, device,
 				    &pm_ib_enabled_fops);
+	device->pm_dump_enable = 0;
+	debugfs_create_file("enable", 0644, pm_d_debugfs, device,
+				    &pm_enabled_fops);
 
 }
 
@@ -247,8 +272,8 @@ static void print_mem_entry(struct seq_file *s, struct kgsl_mem_entry *entry)
 
 	kgsl_get_memory_usage(usage, sizeof(usage), m->flags);
 
-	seq_printf(s, "%08x %8d %5d %5s %10s %16s %5d\n",
-			m->gpuaddr, m->size, entry->id, flags,
+	seq_printf(s, "%08x %08lx %8d %5d %5s %10s %16s %5d\n",
+			m->gpuaddr, m->useraddr, m->size, entry->id, flags,
 			memtype_str(entry->memtype), usage, m->sglen);
 }
 
@@ -259,8 +284,9 @@ static int process_mem_print(struct seq_file *s, void *unused)
 	struct kgsl_process_private *private = s->private;
 	int next = 0;
 
-	seq_printf(s, "%8s %8s %5s %5s %10s %16s %5s\n",
-		   "gpuaddr", "size", "id", "flags", "type", "usage", "sglen");
+	seq_printf(s, "%8s %8s %8s %5s %5s %10s %16s %5s\n",
+		   "gpuaddr", "useraddr", "size", "id", "flags", "type",
+		   "usage", "sglen");
 
 	/* print all entries with a GPU address */
 	spin_lock(&private->mem_lock);

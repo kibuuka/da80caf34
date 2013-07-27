@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -23,7 +23,7 @@
 /*
  * Patterns definitions for read/write requests data
  */
-#define TEST_PATTERN_SEQUENTIAL	-1
+#define TEST_PATTERN_SEQUENTIAL	0x12345678
 #define TEST_PATTERN_5A		0x5A5A5A5A
 #define TEST_PATTERN_FF		0xFFFFFFFF
 #define TEST_NO_PATTERN		0xDEADBEEF
@@ -38,6 +38,7 @@ typedef int (post_test_fn) (struct test_data *);
 typedef char* (get_test_case_str_fn) (struct test_data *);
 typedef void (blk_dev_test_init_fn) (void);
 typedef void (blk_dev_test_exit_fn) (void);
+typedef struct gendisk* (get_rq_disk_fn) (void);
 
 /**
  * enum test_state - defines the state of the test
@@ -132,6 +133,8 @@ struct test_request {
  * @test_duration:	A jiffies value saved for timing
  *			calculations
  * @data:		Test specific private data
+ * @test_byte_count:	Total number of bytes dispatched in
+ *			the test
  */
 struct test_info {
 	int testcase;
@@ -142,7 +145,9 @@ struct test_info {
 	post_test_fn *post_test_fn;
 	get_test_case_str_fn *get_test_case_str_fn;
 	unsigned long test_duration;
+	get_rq_disk_fn *get_rq_disk_fn;
 	void *data;
+	unsigned long test_byte_count;
 };
 
 /**
@@ -229,6 +234,7 @@ struct test_data {
 
 extern int test_iosched_start_test(struct test_info *t_info);
 extern void test_iosched_mark_test_completion(void);
+extern void check_test_completion(void);
 extern int test_iosched_add_unique_test_req(int is_err_expcted,
 		enum req_unique_type req_unique,
 		int start_sec, int nr_sects, rq_end_io_fn *end_req_io);

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -182,6 +182,8 @@ static struct pm8xxx_gpio_init pm8917_gpios[] __initdata = {
 static struct pm8xxx_mpp_init pm8917_mpps[] __initdata = {
 	PM8917_MPP_INIT(PM8XXX_AMUX_MPP_3, A_INPUT,
 				PM8XXX_MPP_AIN_AMUX_CH8, DIN_TO_INT),
+	/* Configure MPP01 for USB ID detection */
+	PM8917_MPP_INIT(1, D_INPUT, PM8921_MPP_DIG_LEVEL_S4, DIN_TO_INT),
 };
 
 void __init msm8930_pm8038_gpio_mpp_init(void)
@@ -372,7 +374,7 @@ static struct wled_config_data wled_cfg = {
 	.op_fdbck = true,
 	.ovp_val = WLED_OVP_32V,
 	.boost_curr_lim = WLED_CURR_LIMIT_525mA,
-	.num_strings = 1,
+	.strings = WLED_SECOND_STRING,
 };
 
 static int pm8038_led0_pwm_duty_pcts[56] = {
@@ -453,7 +455,7 @@ static struct pm8xxx_misc_platform_data pm8xxx_misc_pdata = {
 
 static struct pm8xxx_spk_platform_data pm8xxx_spk_pdata = {
 	.spk_add_enable		= false,
-	.cd_ng_threshold	= 0x6,
+	.cd_ng_threshold	= 0x0,
 	.cd_nf_preamp_bias	= 0x1,
 	.cd_ng_hold		= 0x6,
 	.cd_ng_max_atten	= 0x0,
@@ -474,6 +476,15 @@ static struct pm8921_bms_platform_data pm8921_bms_pdata __devinitdata = {
 	.rconn_mohm			= 18,
 	.normal_voltage_calc_ms		= 20000,
 	.low_voltage_calc_ms		= 1000,
+	.alarm_low_mv			= 3400,
+	.alarm_high_mv			= 4000,
+	.high_ocv_correction_limit_uv	= 50,
+	.low_ocv_correction_limit_uv	= 100,
+	.hold_soc_est			= 3,
+	.enable_fcc_learning		= 1,
+	.min_fcc_learning_soc		= 20,
+	.min_fcc_ocv_pc			= 30,
+	.max_fcc_learning_samples	= 5,
 };
 
 static struct pm8038_platform_data pm8038_platform_data __devinitdata = {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,11 +26,13 @@
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/list.h>
 #include <linux/debugfs.h>
 #include <linux/uaccess.h>
 #include <linux/usb/ch9.h>
 #include <linux/usb/gadget.h>
+#include <linux/qpnp-misc.h>
 #include <linux/usb/msm_hsusb.h>
 #include <linux/regulator/consumer.h>
 #include <linux/power_supply.h>
@@ -38,7 +40,6 @@
 
 #include <mach/rpm-regulator.h>
 #include <mach/rpm-regulator-smd.h>
-#include <mach/msm_xo.h>
 #include <mach/msm_bus.h>
 #include <mach/clk.h>
 
@@ -62,6 +63,11 @@ MODULE_PARM_DESC(adc_meas_interval, "ADC ID polling period");
 static int override_phy_init;
 module_param(override_phy_init, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(override_phy_init, "Override HSPHY Init Seq");
+
+/* Enable Proprietary charger detection */
+static bool prop_chg_detect;
+module_param(prop_chg_detect, bool, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(prop_chg_detect, "Enable Proprietary charger detection");
 
 /**
  *  USB DBM Hardware registers.
@@ -121,6 +127,8 @@ MODULE_PARM_DESC(override_phy_init, "Override HSPHY Init Seq");
 #define DBM_TRB_DMA		0x20000000
 #define DBM_TRB_EP_NUM(ep)	(ep<<24)
 
+#define USB3_PORTSC		(0x430)
+#define PORT_PE			(0x1 << 1)
 /**
  *  USB QSCRATCH Hardware registers
  *
@@ -135,6 +143,8 @@ MODULE_PARM_DESC(override_phy_init, "Override HSPHY Init Seq");
 #define HS_PHY_IRQ_STAT_REG	(QSCRATCH_REG_OFFSET + 0x24)
 #define CGCTL_REG		(QSCRATCH_REG_OFFSET + 0x28)
 #define SS_PHY_CTRL_REG		(QSCRATCH_REG_OFFSET + 0x30)
+#define SS_PHY_PARAM_CTRL_1	(QSCRATCH_REG_OFFSET + 0x34)
+#define SS_PHY_PARAM_CTRL_2	(QSCRATCH_REG_OFFSET + 0x38)
 #define SS_CR_PROTOCOL_DATA_IN_REG  (QSCRATCH_REG_OFFSET + 0x3C)
 #define SS_CR_PROTOCOL_DATA_OUT_REG (QSCRATCH_REG_OFFSET + 0x40)
 #define SS_CR_PROTOCOL_CAP_ADDR_REG (QSCRATCH_REG_OFFSET + 0x44)
@@ -150,7 +160,6 @@ struct dwc3_msm_req_complete {
 };
 
 struct dwc3_msm {
-	struct platform_device *dwc3;
 	struct device *dev;
 	void __iomem *base;
 	u32 resource_size;
@@ -158,17 +167,21 @@ struct dwc3_msm {
 	u8 ep_num_mapping[DBM_MAX_EPS];
 	const struct usb_ep_ops *original_ep_ops[DWC3_ENDPOINTS_NUM];
 	struct list_head req_complete_list;
-	struct msm_xo_voter	*xo_handle;
+	struct clk		*xo_clk;
 	struct clk		*ref_clk;
 	struct clk		*core_clk;
 	struct clk		*iface_clk;
 	struct clk		*sleep_clk;
 	struct clk		*hsphy_sleep_clk;
+	struct clk		*utmi_clk;
 	struct regulator	*hsusb_3p3;
 	struct regulator	*hsusb_1p8;
 	struct regulator	*hsusb_vddcx;
 	struct regulator	*ssusb_1p8;
 	struct regulator	*ssusb_vddcx;
+
+	/* VBUS regulator if no OTG and running in host only mode */
+	struct regulator	*vbus_otg;
 	struct dwc3_ext_xceiv	ext_xceiv;
 	bool			resume_pending;
 	atomic_t                pm_suspended;
@@ -177,12 +190,15 @@ struct dwc3_msm {
 	int			hsphy_init_seq;
 	bool			lpm_irq_seen;
 	struct delayed_work	resume_work;
+	struct work_struct	restart_usb_work;
 	struct wake_lock	wlock;
 	struct dwc3_charger	charger;
 	struct usb_phy		*otg_xceiv;
 	struct delayed_work	chg_work;
 	enum usb_chg_state	chg_state;
-	struct qpnp_adc_tm_usbid_param	adc_param;
+	int			pmic_id_irq;
+	struct work_struct	id_work;
+	struct qpnp_adc_tm_btm_param	adc_param;
 	struct delayed_work	init_adc_work;
 	bool			id_adc_detect;
 	u8			dcd_retries;
@@ -199,6 +215,9 @@ struct dwc3_msm {
 	bool			vbus_active;
 	bool			ext_inuse;
 	enum dwc3_id_state	id_state;
+	unsigned long		lpm_flags;
+#define MDWC3_CORECLK_OFF		BIT(0)
+#define MDWC3_TCXO_SHUTDOWN		BIT(1)
 };
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
@@ -214,7 +233,6 @@ struct dwc3_msm {
 #define USB_SSPHY_1P8_HPM_LOAD		23000	/* uA */
 
 static struct dwc3_msm *context;
-static u64 dwc3_msm_dma_mask = DMA_BIT_MASK(64);
 
 static struct usb_ext_notification *usb_ext;
 
@@ -530,6 +548,7 @@ static int dwc3_msm_dbm_ep_config(u8 usb_ep, u8 bam_pipe,
 static int dwc3_msm_dbm_ep_unconfig(u8 usb_ep)
 {
 	u8 dbm_ep;
+	u32 data;
 
 	dev_dbg(context->dev, "%s\n", __func__);
 
@@ -543,10 +562,18 @@ static int dwc3_msm_dbm_ep_unconfig(u8 usb_ep)
 
 	context->ep_num_mapping[dbm_ep] = 0;
 
-	dwc3_msm_write_reg(context->base, DBM_EP_CFG(dbm_ep), 0);
+	data = dwc3_msm_read_reg(context->base, DBM_EP_CFG(dbm_ep));
+	data &= (~0x1);
+	dwc3_msm_write_reg(context->base, DBM_EP_CFG(dbm_ep), data);
 
 	/* Reset the dbm endpoint */
 	dwc3_msm_dbm_ep_soft_reset(dbm_ep, true);
+	/*
+	 * 10 usec delay is required before deasserting DBM endpoint reset
+	 * according to hardware programming guide.
+	 */
+	udelay(10);
+	dwc3_msm_dbm_ep_soft_reset(dbm_ep, false);
 
 	return 0;
 }
@@ -883,6 +910,8 @@ int msm_ep_config(struct usb_ep *ep)
 	}
 	(*new_ep_ops) = (*ep->ops);
 	new_ep_ops->queue = dwc3_msm_ep_queue;
+	new_ep_ops->disable = ep->ops->disable;
+
 	ep->ops = new_ep_ops;
 
 	/*
@@ -928,6 +957,50 @@ int msm_ep_unconfig(struct usb_ep *ep)
 	return 0;
 }
 EXPORT_SYMBOL(msm_ep_unconfig);
+
+static void dwc3_restart_usb_work(struct work_struct *w)
+{
+	struct dwc3_msm *mdwc = container_of(w, struct dwc3_msm,
+						restart_usb_work);
+
+	dev_dbg(mdwc->dev, "%s\n", __func__);
+
+	if (atomic_read(&mdwc->in_lpm) || !mdwc->otg_xceiv) {
+		dev_err(mdwc->dev, "%s failed!!!\n", __func__);
+		return;
+	}
+
+	if (!mdwc->ext_xceiv.bsv) {
+		dev_dbg(mdwc->dev, "%s bailing out in disconnect\n", __func__);
+		return;
+	}
+
+	/* Reset active USB connection */
+	mdwc->ext_xceiv.bsv = false;
+	queue_delayed_work(system_nrt_wq, &mdwc->resume_work, 0);
+	/* Make sure disconnect is processed before sending connect */
+	flush_delayed_work(&mdwc->resume_work);
+
+	mdwc->ext_xceiv.bsv = true;
+	queue_delayed_work(system_nrt_wq, &mdwc->resume_work, 0);
+}
+
+/**
+ * Reset USB peripheral connection
+ * Inform OTG for Vbus LOW followed by Vbus HIGH notification.
+ * This performs full hardware reset and re-initialization which
+ * might be required by some DBM client driver during uninit/cleanup.
+ */
+void msm_dwc3_restart_usb_session(void)
+{
+	struct dwc3_msm *mdwc = context;
+
+	dev_dbg(mdwc->dev, "%s\n", __func__);
+	queue_work(system_nrt_wq, &mdwc->restart_usb_work);
+
+	return;
+}
+EXPORT_SYMBOL(msm_dwc3_restart_usb_session);
 
 /**
  * msm_register_usb_ext_notification: register for event notification
@@ -1189,11 +1262,66 @@ static int dwc3_msm_link_clk_reset(bool assert)
 	return ret;
 }
 
-/* Initialize QSCRATCH registers for HSPHY and SSPHY operation */
-static void dwc3_msm_qscratch_reg_init(struct dwc3_msm *msm)
+/* Reinitialize SSPHY parameters by overriding using QSCRATCH CR interface */
+static void dwc3_msm_ss_phy_reg_init(struct dwc3_msm *msm)
 {
 	u32 data = 0;
 
+	/*
+	 * WORKAROUND: There is SSPHY suspend bug due to which USB enumerates
+	 * in HS mode instead of SS mode. Workaround it by asserting
+	 * LANE0.TX_ALT_BLOCK.EN_ALT_BUS to enable TX to use alt bus mode
+	 */
+	data = dwc3_msm_ssusb_read_phycreg(msm->base, 0x102D);
+	data |= (1 << 7);
+	dwc3_msm_ssusb_write_phycreg(msm->base, 0x102D, data);
+
+	data = dwc3_msm_ssusb_read_phycreg(msm->base, 0x1010);
+	data &= ~0xFF0;
+	data |= 0x20;
+	dwc3_msm_ssusb_write_phycreg(msm->base, 0x1010, data);
+
+	/*
+	 * Fix RX Equalization setting as follows
+	 * LANE0.RX_OVRD_IN_HI. RX_EQ_EN set to 0
+	 * LANE0.RX_OVRD_IN_HI.RX_EQ_EN_OVRD set to 1
+	 * LANE0.RX_OVRD_IN_HI.RX_EQ set to 3
+	 * LANE0.RX_OVRD_IN_HI.RX_EQ_OVRD set to 1
+	 */
+	data = dwc3_msm_ssusb_read_phycreg(msm->base, 0x1006);
+	data &= ~(1 << 6);
+	data |= (1 << 7);
+	data &= ~(0x7 << 8);
+	data |= (0x3 << 8);
+	data |= (0x1 << 11);
+	dwc3_msm_ssusb_write_phycreg(msm->base, 0x1006, data);
+
+	/*
+	 * Set EQ and TX launch amplitudes as follows
+	 * LANE0.TX_OVRD_DRV_LO.PREEMPH set to 22
+	 * LANE0.TX_OVRD_DRV_LO.AMPLITUDE set to 127
+	 * LANE0.TX_OVRD_DRV_LO.EN set to 1.
+	 */
+	data = dwc3_msm_ssusb_read_phycreg(msm->base, 0x1002);
+	data &= ~0x3F80;
+	data |= (0x16 << 7);
+	data &= ~0x7F;
+	data |= (0x7F | (1 << 14));
+	dwc3_msm_ssusb_write_phycreg(msm->base, 0x1002, data);
+
+	/*
+	 * Set the QSCRATCH SS_PHY_PARAM_CTRL1 parameters as follows
+	 * TX_FULL_SWING [26:20] amplitude to 127
+	 * TX_DEEMPH_3_5DB [13:8] to 22
+	 * LOS_BIAS [2:0] to 0x5
+	 */
+	dwc3_msm_write_readback(msm->base, SS_PHY_PARAM_CTRL_1,
+				0x07f03f07, 0x07f01605);
+}
+
+/* Initialize QSCRATCH registers for HSPHY and SSPHY operation */
+static void dwc3_msm_qscratch_reg_init(struct dwc3_msm *msm)
+{
 	/* SSPHY Initialization: Use ref_clk from pads and set its parameters */
 	dwc3_msm_write_reg(msm->base, SS_PHY_CTRL_REG, 0x10210002);
 	msleep(30);
@@ -1233,39 +1361,30 @@ static void dwc3_msm_qscratch_reg_init(struct dwc3_msm *msm)
 	dwc3_msm_write_reg(msm->base, CGCTL_REG,
 		dwc3_msm_read_reg(msm->base, CGCTL_REG) | 0x18);
 
-	/*
-	 * WORKAROUND: There is SSPHY suspend bug due to which USB enumerates
-	 * in HS mode instead of SS mode. Workaround it by asserting
-	 * LANE0.TX_ALT_BLOCK.EN_ALT_BUS to enable TX to use alt bus mode
-	 */
-	data = dwc3_msm_ssusb_read_phycreg(msm->base, 0x102D);
-	data |= (1 << 7);
-	dwc3_msm_ssusb_write_phycreg(msm->base, 0x102D, data);
-
-	data = dwc3_msm_ssusb_read_phycreg(msm->base, 0x1010);
-	data &= ~0xFF0;
-	data |= 0x40;
-	dwc3_msm_ssusb_write_phycreg(msm->base, 0x1010, data);
+	dwc3_msm_ss_phy_reg_init(msm);
 }
 
-static void dwc3_msm_block_reset(void)
+static void dwc3_msm_block_reset(bool core_reset)
 {
+
 	struct dwc3_msm *mdwc = context;
 	int ret  = 0;
 
-	ret = dwc3_msm_link_clk_reset(1);
-	if (ret)
-		return;
+	if (core_reset) {
+		ret = dwc3_msm_link_clk_reset(1);
+		if (ret)
+			return;
 
-	usleep_range(1000, 1200);
-	ret = dwc3_msm_link_clk_reset(0);
-	if (ret)
-		return;
+		usleep_range(1000, 1200);
+		ret = dwc3_msm_link_clk_reset(0);
+		if (ret)
+			return;
 
-	usleep_range(10000, 12000);
+		usleep_range(10000, 12000);
 
-	/* Reinitialize QSCRATCH registers after block reset */
-	dwc3_msm_qscratch_reg_init(mdwc);
+		/* Reinitialize QSCRATCH registers after block reset */
+		dwc3_msm_qscratch_reg_init(mdwc);
+	}
 
 	/* Reset the DBM */
 	dwc3_msm_dbm_soft_reset(1);
@@ -1291,6 +1410,17 @@ static void dwc3_chg_enable_secondary_det(struct dwc3_msm *mdwc)
 	 * and enable battery charging comparators.
 	 */
 	dwc3_msm_write_readback(mdwc->base, CHARGING_DET_CTRL_REG, 0x3F, 0x34);
+}
+
+static bool dwc3_chg_det_check_linestate(struct dwc3_msm *mdwc)
+{
+	u32 chg_det;
+
+	if (!prop_chg_detect)
+		return false;
+
+	chg_det = dwc3_msm_read_reg(mdwc->base, CHARGING_DET_OUTPUT_REG);
+	return chg_det & (3 << 8);
 }
 
 static bool dwc3_chg_det_check_output(struct dwc3_msm *mdwc)
@@ -1358,9 +1488,10 @@ static void dwc3_chg_block_reset(struct dwc3_msm *mdwc)
 static const char *chg_to_string(enum dwc3_chg_type chg_type)
 {
 	switch (chg_type) {
-	case USB_SDP_CHARGER:		return "USB_SDP_CHARGER";
-	case USB_DCP_CHARGER:		return "USB_DCP_CHARGER";
-	case USB_CDP_CHARGER:		return "USB_CDP_CHARGER";
+	case DWC3_SDP_CHARGER:		return "USB_SDP_CHARGER";
+	case DWC3_DCP_CHARGER:		return "USB_DCP_CHARGER";
+	case DWC3_CDP_CHARGER:		return "USB_CDP_CHARGER";
+	case DWC3_PROPRIETARY_CHARGER:	return "USB_PROPRIETARY_CHARGER";
 	default:			return "INVALID_CHARGER";
 	}
 }
@@ -1390,6 +1521,14 @@ static void dwc3_chg_detect_work(struct work_struct *w)
 		tmout = ++mdwc->dcd_retries == DWC3_CHG_DCD_MAX_RETRIES;
 		if (is_dcd || tmout) {
 			dwc3_chg_disable_dcd(mdwc);
+			if (dwc3_chg_det_check_linestate(mdwc)) {
+				dev_dbg(mdwc->dev, "proprietary charger\n");
+				mdwc->charger.chg_type =
+						DWC3_PROPRIETARY_CHARGER;
+				mdwc->chg_state = USB_CHG_STATE_DETECTED;
+				delay = 0;
+				break;
+			}
 			dwc3_chg_enable_primary_det(mdwc);
 			delay = DWC3_CHG_PRIMARY_DET_TIME;
 			mdwc->chg_state = USB_CHG_STATE_DCD_DONE;
@@ -1404,7 +1543,7 @@ static void dwc3_chg_detect_work(struct work_struct *w)
 			delay = DWC3_CHG_SECONDARY_DET_TIME;
 			mdwc->chg_state = USB_CHG_STATE_PRIMARY_DONE;
 		} else {
-			mdwc->charger.chg_type = USB_SDP_CHARGER;
+			mdwc->charger.chg_type = DWC3_SDP_CHARGER;
 			mdwc->chg_state = USB_CHG_STATE_DETECTED;
 			delay = 0;
 		}
@@ -1412,9 +1551,9 @@ static void dwc3_chg_detect_work(struct work_struct *w)
 	case USB_CHG_STATE_PRIMARY_DONE:
 		vout = dwc3_chg_det_check_output(mdwc);
 		if (vout)
-			mdwc->charger.chg_type = USB_DCP_CHARGER;
+			mdwc->charger.chg_type = DWC3_DCP_CHARGER;
 		else
-			mdwc->charger.chg_type = USB_CDP_CHARGER;
+			mdwc->charger.chg_type = DWC3_CDP_CHARGER;
 		mdwc->chg_state = USB_CHG_STATE_SECONDARY_DONE;
 		/* fall through */
 	case USB_CHG_STATE_SECONDARY_DONE:
@@ -1459,6 +1598,8 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 {
 	int ret;
 	bool dcp;
+	bool host_bus_suspend;
+	bool host_ss_active;
 
 	dev_dbg(mdwc->dev, "%s: entering lpm\n", __func__);
 
@@ -1467,6 +1608,7 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 		return 0;
 	}
 
+	host_ss_active = dwc3_msm_read_reg(mdwc->base, USB3_PORTSC) & PORT_PE;
 	if (mdwc->hs_phy_irq)
 		disable_irq(mdwc->hs_phy_irq);
 
@@ -1480,18 +1622,9 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 								0x37, 0x0);
 	}
 
-	dcp = mdwc->charger.chg_type == DWC3_DCP_CHARGER;
-
-	/* Sequence to put hardware in low power state:
-	 * 1. Set OTGDISABLE to disable OTG block in HSPHY (saves power)
-	 * 2. Clear charger detection control fields (performed above)
-	 * 3. SUSPEND PHY and turn OFF core clock after some delay
-	 * 4. Clear interrupt latch register and enable BSV, ID HV interrupts
-	 * 5. Enable PHY retention
-	 */
-	dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0x1000, 0x1000);
-	dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG,
-						0xC00000, 0x800000);
+	dcp = ((mdwc->charger.chg_type == DWC3_DCP_CHARGER) ||
+	      (mdwc->charger.chg_type == DWC3_PROPRIETARY_CHARGER));
+	host_bus_suspend = mdwc->host_mode == 1;
 
 	/* Sequence to put SSPHY in low power state:
 	 * 1. Clear REF_SS_PHY_EN in SS_PHY_CTRL_REG
@@ -1507,21 +1640,58 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 	usleep_range(1000, 1200);
 	clk_disable_unprepare(mdwc->ref_clk);
 
-	dwc3_msm_write_reg(mdwc->base, HS_PHY_IRQ_STAT_REG, 0xFFF);
-	dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0x18000, 0x18000);
-	if (!dcp)
-		dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0x2, 0x0);
+	if (host_bus_suspend) {
+		/* Sequence for host bus suspend case:
+		 * 1. Set suspend and sleep bits in GUSB2PHYCONFIG reg
+		 * 2. Clear interrupt latch register and enable BSV, ID HV intr
+		 * 3. Enable DP and DM HV interrupts in ALT_INTERRUPT_EN_REG
+		 */
+		dwc3_msm_write_reg(mdwc->base, DWC3_GUSB2PHYCFG(0),
+			dwc3_msm_read_reg(mdwc->base, DWC3_GUSB2PHYCFG(0)) |
+								0x00000140);
+		dwc3_msm_write_reg(mdwc->base, HS_PHY_IRQ_STAT_REG, 0xFFF);
+		if (mdwc->otg_xceiv && (!mdwc->ext_xceiv.otg_capability))
+			dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG,
+							 0x18000, 0x18000);
+		dwc3_msm_write_reg(mdwc->base, ALT_INTERRUPT_EN_REG, 0xFC0);
+		udelay(5);
+	} else {
+		/* Sequence to put hardware in low power state:
+		 * 1. Set OTGDISABLE to disable OTG block in HSPHY (saves power)
+		 * 2. Clear charger detection control fields (performed above)
+		 * 3. SUSPEND PHY and turn OFF core clock after some delay
+		 * 4. Clear interrupt latch register and enable BSV, ID HV intr
+		 * 5. Enable PHY retention
+		 */
+		dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0x1000,
+									0x1000);
+		dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG,
+							0xC00000, 0x800000);
+		dwc3_msm_write_reg(mdwc->base, HS_PHY_IRQ_STAT_REG, 0xFFF);
+		if (mdwc->otg_xceiv && (!mdwc->ext_xceiv.otg_capability))
+			dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG,
+							0x18000, 0x18000);
+		if (!dcp)
+			dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG,
+								0x2, 0x0);
+	}
 
 	/* make sure above writes are completed before turning off clocks */
 	wmb();
-	clk_disable_unprepare(mdwc->core_clk);
+	if (!host_bus_suspend || !host_ss_active) {
+		clk_disable_unprepare(mdwc->core_clk);
+		mdwc->lpm_flags |= MDWC3_CORECLK_OFF;
+	}
 	clk_disable_unprepare(mdwc->iface_clk);
 
-	/* USB PHY no more requires TCXO */
-	ret = msm_xo_mode_vote(mdwc->xo_handle, MSM_XO_MODE_OFF);
-	if (ret)
-		dev_err(mdwc->dev, "%s failed to devote for TCXO buffer%d\n",
-						__func__, ret);
+	if (!host_bus_suspend)
+		clk_disable_unprepare(mdwc->utmi_clk);
+
+	if (!host_bus_suspend) {
+		/* USB PHY no more requires TCXO */
+		clk_disable_unprepare(mdwc->xo_clk);
+		mdwc->lpm_flags |= MDWC3_TCXO_SHUTDOWN;
+	}
 
 	if (mdwc->bus_perf_client) {
 		ret = msm_bus_scale_client_update_request(
@@ -1530,19 +1700,25 @@ static int dwc3_msm_suspend(struct dwc3_msm *mdwc)
 			dev_err(mdwc->dev, "Failed to reset bus bw vote\n");
 	}
 
-	if (mdwc->otg_xceiv && mdwc->ext_xceiv.otg_capability && !dcp)
+	if (mdwc->otg_xceiv && mdwc->ext_xceiv.otg_capability && !dcp &&
+							!host_bus_suspend)
 		dwc3_hsusb_ldo_enable(0);
 
 	dwc3_ssusb_ldo_enable(0);
 	dwc3_ssusb_config_vddcx(0);
-	dwc3_hsusb_config_vddcx(0);
+	if (!host_bus_suspend && !dcp)
+		dwc3_hsusb_config_vddcx(0);
 	wake_unlock(&mdwc->wlock);
 	atomic_set(&mdwc->in_lpm, 1);
 
 	dev_info(mdwc->dev, "DWC3 in low power mode\n");
 
-	if (mdwc->hs_phy_irq)
+	if (mdwc->hs_phy_irq) {
 		enable_irq(mdwc->hs_phy_irq);
+		/* with DCP we dont require wakeup using HS_PHY_IRQ */
+		if (dcp)
+			disable_irq_wake(mdwc->hs_phy_irq);
+	}
 
 	return 0;
 }
@@ -1551,6 +1727,7 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 {
 	int ret;
 	bool dcp;
+	bool host_bus_suspend;
 
 	dev_dbg(mdwc->dev, "%s: exiting lpm\n", __func__);
 
@@ -1568,39 +1745,77 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 			dev_err(mdwc->dev, "Failed to vote for bus scaling\n");
 	}
 
-	/* Vote for TCXO while waking up USB HSPHY */
-	ret = msm_xo_mode_vote(mdwc->xo_handle, MSM_XO_MODE_ON);
-	if (ret)
-		dev_err(mdwc->dev, "%s failed to vote for TCXO buffer%d\n",
-						__func__, ret);
+	dcp = ((mdwc->charger.chg_type == DWC3_DCP_CHARGER) ||
+	      (mdwc->charger.chg_type == DWC3_PROPRIETARY_CHARGER));
+	host_bus_suspend = mdwc->host_mode == 1;
 
-	dcp = mdwc->charger.chg_type == DWC3_DCP_CHARGER;
-	if (mdwc->otg_xceiv && mdwc->ext_xceiv.otg_capability && !dcp)
+	if (mdwc->lpm_flags & MDWC3_TCXO_SHUTDOWN) {
+		/* Vote for TCXO while waking up USB HSPHY */
+		ret = clk_prepare_enable(mdwc->xo_clk);
+		if (ret)
+			dev_err(mdwc->dev, "%s failed to vote TCXO buffer%d\n",
+						__func__, ret);
+		mdwc->lpm_flags &= ~MDWC3_TCXO_SHUTDOWN;
+	}
+
+	if (!host_bus_suspend)
+		clk_prepare_enable(mdwc->utmi_clk);
+
+	if (mdwc->otg_xceiv && mdwc->ext_xceiv.otg_capability && !dcp &&
+							!host_bus_suspend)
 		dwc3_hsusb_ldo_enable(1);
 
 	dwc3_ssusb_ldo_enable(1);
 	dwc3_ssusb_config_vddcx(1);
-	dwc3_hsusb_config_vddcx(1);
+
+	if (!host_bus_suspend && !dcp)
+		dwc3_hsusb_config_vddcx(1);
+
 	clk_prepare_enable(mdwc->ref_clk);
 	usleep_range(1000, 1200);
 
 	clk_prepare_enable(mdwc->iface_clk);
-	clk_prepare_enable(mdwc->core_clk);
+	if (mdwc->lpm_flags & MDWC3_CORECLK_OFF) {
+		clk_prepare_enable(mdwc->core_clk);
+		mdwc->lpm_flags &= ~MDWC3_CORECLK_OFF;
+	}
 
-	/* Disable HV interrupt */
-	dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0x18000, 0x0);
-	/* Disable Retention */
-	dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0x2, 0x2);
+	if (host_bus_suspend) {
+		/* Disable HV interrupt */
+		if (mdwc->otg_xceiv && (!mdwc->ext_xceiv.otg_capability))
+			dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG,
+							0x18000, 0x0);
+		/* Clear interrupt latch register */
+		dwc3_msm_write_reg(mdwc->base, HS_PHY_IRQ_STAT_REG, 0x000);
 
-	dwc3_msm_write_reg(mdwc->base, DWC3_GUSB2PHYCFG(0),
-	      dwc3_msm_read_reg(mdwc->base, DWC3_GUSB2PHYCFG(0)) | 0xF0000000);
-	/* 10usec delay required before de-asserting PHY RESET */
-	udelay(10);
-	dwc3_msm_write_reg(mdwc->base, DWC3_GUSB2PHYCFG(0),
-	      dwc3_msm_read_reg(mdwc->base, DWC3_GUSB2PHYCFG(0)) & 0x7FFFFFFF);
+		/* Disable DP and DM HV interrupt */
+		dwc3_msm_write_reg(mdwc->base, ALT_INTERRUPT_EN_REG, 0x000);
 
-	/* Bring PHY out of suspend */
-	dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0xC00000, 0x0);
+		/* Clear suspend bit in GUSB2PHYCONFIG register */
+		dwc3_msm_write_readback(mdwc->base, DWC3_GUSB2PHYCFG(0),
+								0x40, 0x0);
+	} else {
+		/* Disable HV interrupt */
+		if (mdwc->otg_xceiv && (!mdwc->ext_xceiv.otg_capability))
+			dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG,
+								0x18000, 0x0);
+		/* Disable Retention */
+		dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0x2, 0x2);
+
+		dwc3_msm_write_reg(mdwc->base, DWC3_GUSB2PHYCFG(0),
+			dwc3_msm_read_reg(mdwc->base, DWC3_GUSB2PHYCFG(0)) |
+								 0xF0000000);
+		/* 10usec delay required before de-asserting PHY RESET */
+		udelay(10);
+		dwc3_msm_write_reg(mdwc->base, DWC3_GUSB2PHYCFG(0),
+		      dwc3_msm_read_reg(mdwc->base, DWC3_GUSB2PHYCFG(0)) &
+								0x7FFFFFFF);
+
+		/* Bring PHY out of suspend */
+		dwc3_msm_write_readback(mdwc->base, HS_PHY_CTRL_REG, 0xC00000,
+									0x0);
+
+	}
 
 	/* Assert SS PHY RESET */
 	dwc3_msm_write_readback(mdwc->base, SS_PHY_CTRL_REG, (1 << 7),
@@ -1614,6 +1829,11 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 	udelay(10);
 	dwc3_msm_write_readback(mdwc->base, SS_PHY_CTRL_REG, (1 << 7), 0x0);
 
+	/*
+	 * Reinitilize SSPHY parameters as SS_PHY RESET will reset
+	 * the internal registers to default values.
+	 */
+	dwc3_msm_ss_phy_reg_init(mdwc);
 	atomic_set(&mdwc->in_lpm, 0);
 
 	/* match disable_irq call from isr */
@@ -1621,6 +1841,9 @@ static int dwc3_msm_resume(struct dwc3_msm *mdwc)
 		enable_irq(mdwc->hs_phy_irq);
 		mdwc->lpm_irq_seen = false;
 	}
+	/* it must DCP disconnect, re-enable HS_PHY wakeup IRQ */
+	if (mdwc->hs_phy_irq && dcp)
+		enable_irq_wake(mdwc->hs_phy_irq);
 
 	dev_info(mdwc->dev, "DWC3 exited from low power mode\n");
 
@@ -1650,7 +1873,7 @@ static void dwc3_resume_work(struct work_struct *w)
 		if (mdwc->otg_xceiv)
 			mdwc->ext_xceiv.notify_ext_events(mdwc->otg_xceiv->otg,
 							DWC3_EVENT_PHY_RESUME);
-		pm_runtime_put_sync(mdwc->dev);
+		pm_runtime_put_noidle(mdwc->dev);
 		if (mdwc->otg_xceiv && (mdwc->ext_xceiv.otg_capability))
 			mdwc->ext_xceiv.notify_ext_events(mdwc->otg_xceiv->otg,
 							DWC3_EVENT_XCEIV_STATE);
@@ -1779,6 +2002,9 @@ static int dwc3_msm_power_get_property_usb(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_ONLINE:
 		val->intval = mdwc->online;
 		break;
+	case POWER_SUPPLY_PROP_TYPE:
+		val->intval = psy->type;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -1803,16 +2029,8 @@ static int dwc3_msm_power_set_property_usb(struct power_supply *psy,
 		if (mdwc->otg_xceiv && !mdwc->ext_inuse &&
 		    (mdwc->ext_xceiv.otg_capability || !init)) {
 			mdwc->ext_xceiv.bsv = val->intval;
-			if (atomic_read(&mdwc->in_lpm)) {
-				dev_dbg(mdwc->dev,
-					"%s received in LPM\n", __func__);
-				queue_delayed_work(system_nrt_wq,
-							&mdwc->resume_work, 0);
-			} else {
-				mdwc->ext_xceiv.notify_ext_events(
-							mdwc->otg_xceiv->otg,
-							DWC3_EVENT_XCEIV_STATE);
-			}
+			queue_delayed_work(system_nrt_wq,
+							&mdwc->resume_work, 20);
 
 			if (!init)
 				init = true;
@@ -1824,6 +2042,9 @@ static int dwc3_msm_power_set_property_usb(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		mdwc->current_max = val->intval;
+		break;
+	case POWER_SUPPLY_PROP_TYPE:
+		psy->type = val->intval;
 		break;
 	default:
 		return -EINVAL;
@@ -1912,19 +2133,49 @@ static void dwc3_ext_notify_online(int on)
 		queue_delayed_work(system_nrt_wq, &mdwc->resume_work, 0);
 }
 
-static bool dwc3_ext_trigger_handled(struct dwc3_msm *mdwc,
-				     enum dwc3_id_state id)
+static void dwc3_id_work(struct work_struct *w)
 {
+	struct dwc3_msm *mdwc = container_of(w, struct dwc3_msm, id_work);
 	int ret;
 
-	if (!usb_ext)
-		return false;
+	/* Give external client a chance to handle */
+	if (!mdwc->ext_inuse && usb_ext) {
+		if (mdwc->pmic_id_irq)
+			disable_irq(mdwc->pmic_id_irq);
 
-	ret = usb_ext->notify(usb_ext->ctxt, id, dwc3_ext_notify_online);
-	dev_dbg(mdwc->dev, "%s: external event handler returned %d\n", __func__,
-			ret);
-	mdwc->ext_inuse = ret == 0;
-	return mdwc->ext_inuse;
+		ret = usb_ext->notify(usb_ext->ctxt, mdwc->id_state,
+				      dwc3_ext_notify_online);
+		dev_dbg(mdwc->dev, "%s: external handler returned %d\n",
+			__func__, ret);
+
+		if (mdwc->pmic_id_irq) {
+			/* ID may have changed while IRQ disabled; update it */
+			mdwc->id_state = !!irq_read_line(mdwc->pmic_id_irq);
+			enable_irq(mdwc->pmic_id_irq);
+		}
+
+		mdwc->ext_inuse = (ret == 0);
+	}
+
+	if (!mdwc->ext_inuse) { /* notify OTG */
+		mdwc->ext_xceiv.id = mdwc->id_state;
+		dwc3_resume_work(&mdwc->resume_work.work);
+	}
+}
+
+static irqreturn_t dwc3_pmic_id_irq(int irq, void *data)
+{
+	struct dwc3_msm *mdwc = data;
+	enum dwc3_id_state id;
+
+	/* If we can't read ID line state for some reason, treat it as float */
+	id = !!irq_read_line(irq);
+	if (mdwc->id_state != id) {
+		mdwc->id_state = id;
+		queue_work(system_nrt_wq, &mdwc->id_work);
+	}
+
+	return IRQ_HANDLED;
 }
 
 static void dwc3_adc_notification(enum qpnp_tm_state state, void *ctx)
@@ -1939,10 +2190,6 @@ static void dwc3_adc_notification(enum qpnp_tm_state state, void *ctx)
 	dev_dbg(mdwc->dev, "%s: state = %s\n", __func__,
 			state == ADC_TM_HIGH_STATE ? "high" : "low");
 
-	/* Give external client a chance to handle */
-	if (!mdwc->ext_inuse)
-		dwc3_ext_trigger_handled(mdwc, (state == ADC_TM_HIGH_STATE));
-
 	/* save ID state, but don't necessarily notify OTG */
 	if (state == ADC_TM_HIGH_STATE) {
 		mdwc->id_state = DWC3_ID_FLOAT;
@@ -1952,13 +2199,10 @@ static void dwc3_adc_notification(enum qpnp_tm_state state, void *ctx)
 		mdwc->adc_param.state_request = ADC_TM_HIGH_THR_ENABLE;
 	}
 
+	dwc3_id_work(&mdwc->id_work);
+
 	/* re-arm ADC interrupt */
 	qpnp_adc_tm_usbid_configure(&mdwc->adc_param);
-
-	if (!mdwc->ext_inuse) { /* notify OTG */
-		mdwc->ext_xceiv.id = mdwc->id_state;
-		queue_delayed_work(system_nrt_wq, &mdwc->resume_work, 0);
-	}
 }
 
 static void dwc3_init_adc_work(struct work_struct *w)
@@ -1978,7 +2222,7 @@ static void dwc3_init_adc_work(struct work_struct *w)
 	mdwc->adc_param.high_thr = adc_high_threshold;
 	mdwc->adc_param.timer_interval = adc_meas_interval;
 	mdwc->adc_param.state_request = ADC_TM_HIGH_LOW_THR_ENABLE;
-	mdwc->adc_param.usbid_ctx = mdwc;
+	mdwc->adc_param.btm_ctx = mdwc;
 	mdwc->adc_param.threshold_notification = dwc3_adc_notification;
 
 	ret = qpnp_adc_tm_usbid_configure(&mdwc->adc_param);
@@ -2020,10 +2264,10 @@ static DEVICE_ATTR(adc_enable, S_IRUGO | S_IWUSR, adc_enable_show,
 static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 {
 	struct device_node *node = pdev->dev.of_node;
-	struct platform_device *dwc3;
 	struct dwc3_msm *msm;
 	struct resource *res;
 	void __iomem *tcsr;
+	unsigned long flags;
 	int ret = 0;
 	int len = 0;
 	u32 tmp[3];
@@ -2041,20 +2285,22 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&msm->req_complete_list);
 	INIT_DELAYED_WORK(&msm->chg_work, dwc3_chg_detect_work);
 	INIT_DELAYED_WORK(&msm->resume_work, dwc3_resume_work);
+	INIT_WORK(&msm->restart_usb_work, dwc3_restart_usb_work);
+	INIT_WORK(&msm->id_work, dwc3_id_work);
 	INIT_DELAYED_WORK(&msm->init_adc_work, dwc3_init_adc_work);
 
-	msm->xo_handle = msm_xo_get(MSM_XO_TCXO_D0, "usb");
-	if (IS_ERR(msm->xo_handle)) {
+	msm->xo_clk = clk_get(&pdev->dev, "xo");
+	if (IS_ERR(msm->xo_clk)) {
 		dev_err(&pdev->dev, "%s unable to get TCXO buffer handle\n",
 								__func__);
-		return PTR_ERR(msm->xo_handle);
+		return PTR_ERR(msm->xo_clk);
 	}
 
-	ret = msm_xo_mode_vote(msm->xo_handle, MSM_XO_MODE_ON);
+	ret = clk_prepare_enable(msm->xo_clk);
 	if (ret) {
 		dev_err(&pdev->dev, "%s failed to vote for TCXO buffer%d\n",
 						__func__, ret);
-		goto free_xo_handle;
+		goto put_xo;
 	}
 
 	/*
@@ -2065,7 +2311,7 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 	if (IS_ERR(msm->core_clk)) {
 		dev_err(&pdev->dev, "failed to get core_clk\n");
 		ret = PTR_ERR(msm->core_clk);
-		goto free_xo_handle;
+		goto disable_xo;
 	}
 	clk_set_rate(msm->core_clk, 125000000);
 	clk_prepare_enable(msm->core_clk);
@@ -2094,14 +2340,21 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 	}
 	clk_prepare_enable(msm->hsphy_sleep_clk);
 
+	msm->utmi_clk = devm_clk_get(&pdev->dev, "utmi_clk");
+	if (IS_ERR(msm->utmi_clk)) {
+		dev_err(&pdev->dev, "failed to get utmi_clk\n");
+		ret = PTR_ERR(msm->utmi_clk);
+		goto disable_sleep_a_clk;
+	}
+	clk_prepare_enable(msm->utmi_clk);
+
 	msm->ref_clk = devm_clk_get(&pdev->dev, "ref_clk");
 	if (IS_ERR(msm->ref_clk)) {
 		dev_err(&pdev->dev, "failed to get ref_clk\n");
 		ret = PTR_ERR(msm->ref_clk);
-		goto disable_sleep_a_clk;
+		goto disable_utmi_clk;
 	}
 	clk_prepare_enable(msm->ref_clk);
-
 
 	of_get_property(node, "qcom,vdd-voltage-level", &len);
 	if (len == sizeof(tmp)) {
@@ -2180,31 +2433,74 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 		goto free_hs_ldo_init;
 	}
 
-	msm->ext_xceiv.id = DWC3_ID_FLOAT;
+	msm->id_state = msm->ext_xceiv.id = DWC3_ID_FLOAT;
 	msm->ext_xceiv.otg_capability = of_property_read_bool(node,
 				"qcom,otg-capability");
 	msm->charger.charging_disabled = of_property_read_bool(node,
 				"qcom,charging-disabled");
 
-	if (!msm->ext_xceiv.otg_capability) {
-		/* DWC3 has separate IRQ line for OTG events (ID/BSV etc.) */
-		msm->hs_phy_irq = platform_get_irq_byname(pdev, "hs_phy_irq");
-		if (msm->hs_phy_irq < 0) {
-			dev_dbg(&pdev->dev, "pget_irq for hs_phy_irq failed\n");
-			msm->hs_phy_irq = 0;
-		} else {
-			ret = request_irq(msm->hs_phy_irq, msm_dwc3_irq,
-					IRQF_TRIGGER_RISING, "msm_dwc3", msm);
-			if (ret) {
-				dev_err(&pdev->dev, "irqreq HSPHYINT failed\n");
-				goto disable_hs_ldo;
-			}
-			enable_irq_wake(msm->hs_phy_irq);
-		}
+	msm->charger.skip_chg_detect = of_property_read_bool(node,
+				"qcom,skip-charger-detection");
+	/*
+	 * DWC3 has separate IRQ line for OTG events (ID/BSV) and for
+	 * DP and DM linestate transitions during low power mode.
+	 */
+	msm->hs_phy_irq = platform_get_irq_byname(pdev, "hs_phy_irq");
+	if (msm->hs_phy_irq < 0) {
+		dev_dbg(&pdev->dev, "pget_irq for hs_phy_irq failed\n");
+		msm->hs_phy_irq = 0;
 	} else {
-		/* Use ADC for ID pin detection */
-		queue_delayed_work(system_nrt_wq, &msm->init_adc_work, 0);
-		device_create_file(&pdev->dev, &dev_attr_adc_enable);
+		ret = devm_request_irq(&pdev->dev, msm->hs_phy_irq,
+				msm_dwc3_irq, IRQF_TRIGGER_RISING,
+			       "msm_dwc3", msm);
+		if (ret) {
+			dev_err(&pdev->dev, "irqreq HSPHYINT failed\n");
+			goto disable_hs_ldo;
+		}
+		enable_irq_wake(msm->hs_phy_irq);
+	}
+
+	if (msm->ext_xceiv.otg_capability) {
+		msm->pmic_id_irq = platform_get_irq_byname(pdev, "pmic_id_irq");
+		if (msm->pmic_id_irq > 0) {
+			/* check if PMIC ID IRQ is supported */
+			ret = qpnp_misc_irqs_available(&pdev->dev);
+
+			if (ret == -EPROBE_DEFER) {
+				/* qpnp hasn't probed yet; defer dwc probe */
+				goto disable_hs_ldo;
+			} else if (ret == 0) {
+				msm->pmic_id_irq = 0;
+			} else {
+				ret = devm_request_irq(&pdev->dev,
+						       msm->pmic_id_irq,
+						       dwc3_pmic_id_irq,
+						       IRQF_TRIGGER_RISING |
+						       IRQF_TRIGGER_FALLING,
+						       "dwc3_msm_pmic_id", msm);
+				if (ret) {
+					dev_err(&pdev->dev, "irqreq IDINT failed\n");
+					goto disable_hs_ldo;
+				}
+
+				local_irq_save(flags);
+				/* Update initial ID state */
+				msm->id_state =
+					!!irq_read_line(msm->pmic_id_irq);
+				if (msm->id_state == DWC3_ID_GROUND)
+					queue_work(system_nrt_wq,
+							&msm->id_work);
+				local_irq_restore(flags);
+				enable_irq_wake(msm->pmic_id_irq);
+			}
+		}
+
+		if (msm->pmic_id_irq <= 0) {
+			/* If no PMIC ID IRQ, use ADC for ID pin detection */
+			queue_work(system_nrt_wq, &msm->init_adc_work.work);
+			device_create_file(&pdev->dev, &dev_attr_adc_enable);
+			msm->pmic_id_irq = 0;
+		}
 	}
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
@@ -2230,7 +2526,7 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 	if (!res) {
 		dev_err(&pdev->dev, "missing memory base resource\n");
 		ret = -ENODEV;
-		goto free_hsphy_irq;
+		goto disable_hs_ldo;
 	}
 
 	msm->base = devm_ioremap_nocache(&pdev->dev, res->start,
@@ -2238,22 +2534,10 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 	if (!msm->base) {
 		dev_err(&pdev->dev, "ioremap failed\n");
 		ret = -ENODEV;
-		goto free_hsphy_irq;
+		goto disable_hs_ldo;
 	}
 
-	dwc3 = platform_device_alloc("dwc3", -1);
-	if (!dwc3) {
-		dev_err(&pdev->dev, "couldn't allocate dwc3 device\n");
-		ret = -ENODEV;
-		goto free_hsphy_irq;
-	}
-
-	dwc3->dev.parent = &pdev->dev;
-	dwc3->dev.coherent_dma_mask = DMA_BIT_MASK(32);
-	dwc3->dev.dma_mask = &dwc3_msm_dma_mask;
-	dwc3->dev.dma_parms = pdev->dev.dma_parms;
 	msm->resource_size = resource_size(res);
-	msm->dwc3 = dwc3;
 
 	if (of_property_read_u32(node, "qcom,dwc-hsphy-init",
 						&msm->hsphy_init_seq))
@@ -2279,40 +2563,40 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 			"max: %d, dbm_num_eps: %d\n",
 			DBM_MAX_EPS, msm->dbm_num_eps);
 		ret = -ENODEV;
-		goto put_pdev;
+		goto disable_hs_ldo;
 	}
 
-	msm->usb_psy.name = "usb";
-	msm->usb_psy.type = POWER_SUPPLY_TYPE_USB;
-	msm->usb_psy.supplied_to = dwc3_msm_pm_power_supplied_to;
-	msm->usb_psy.num_supplicants = ARRAY_SIZE(
-					dwc3_msm_pm_power_supplied_to);
-	msm->usb_psy.properties = dwc3_msm_pm_power_props_usb;
-	msm->usb_psy.num_properties = ARRAY_SIZE(dwc3_msm_pm_power_props_usb);
-	msm->usb_psy.get_property = dwc3_msm_power_get_property_usb;
-	msm->usb_psy.set_property = dwc3_msm_power_set_property_usb;
-	msm->usb_psy.external_power_changed =
-				dwc3_msm_external_power_changed;
+	/* usb_psy required only for vbus_notifications or charging support */
+	if (msm->ext_xceiv.otg_capability || !msm->charger.charging_disabled) {
+		msm->usb_psy.name = "usb";
+		msm->usb_psy.type = POWER_SUPPLY_TYPE_USB;
+		msm->usb_psy.supplied_to = dwc3_msm_pm_power_supplied_to;
+		msm->usb_psy.num_supplicants = ARRAY_SIZE(
+						dwc3_msm_pm_power_supplied_to);
+		msm->usb_psy.properties = dwc3_msm_pm_power_props_usb;
+		msm->usb_psy.num_properties =
+					ARRAY_SIZE(dwc3_msm_pm_power_props_usb);
+		msm->usb_psy.get_property = dwc3_msm_power_get_property_usb;
+		msm->usb_psy.set_property = dwc3_msm_power_set_property_usb;
+		msm->usb_psy.external_power_changed =
+					dwc3_msm_external_power_changed;
 
-	ret = power_supply_register(&pdev->dev, &msm->usb_psy);
-	if (ret < 0) {
-		dev_err(&pdev->dev,
-				"%s:power_supply_register usb failed\n",
-					__func__);
-		goto put_pdev;
+		ret = power_supply_register(&pdev->dev, &msm->usb_psy);
+		if (ret < 0) {
+			dev_err(&pdev->dev,
+					"%s:power_supply_register usb failed\n",
+						__func__);
+			goto disable_hs_ldo;
+		}
 	}
 
-	ret = platform_device_add_resources(dwc3, pdev->resource,
-		pdev->num_resources);
-	if (ret) {
-		dev_err(&pdev->dev, "couldn't add resources to dwc3 device\n");
-		goto put_psupply;
-	}
-
-	ret = platform_device_add(dwc3);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to register dwc3 device\n");
-		goto put_psupply;
+	if (node) {
+		ret = of_platform_populate(node, NULL, NULL, &pdev->dev);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"failed to add create dwc3 core\n");
+			goto put_psupply;
+		}
 	}
 
 	msm->bus_scale_table = msm_bus_cl_get_pdata(pdev);
@@ -2328,13 +2612,19 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 	}
 
 	msm->otg_xceiv = usb_get_transceiver();
-	if (msm->otg_xceiv) {
-		msm->charger.start_detection = dwc3_start_chg_det;
-		ret = dwc3_set_charger(msm->otg_xceiv->otg, &msm->charger);
-		if (ret || !msm->charger.notify_detection_complete) {
-			dev_err(&pdev->dev, "failed to register charger: %d\n",
-									ret);
-			goto put_xcvr;
+	/* Register with OTG if present, ignore USB2 OTG using other PHY */
+	if (msm->otg_xceiv && !(msm->otg_xceiv->flags & ENABLE_SECONDARY_PHY)) {
+		/* Skip charger detection for simulator targets */
+		if (!msm->charger.skip_chg_detect) {
+			msm->charger.start_detection = dwc3_start_chg_det;
+			ret = dwc3_set_charger(msm->otg_xceiv->otg,
+					&msm->charger);
+			if (ret || !msm->charger.notify_detection_complete) {
+				dev_err(&pdev->dev,
+					"failed to register charger: %d\n",
+					ret);
+				goto put_xcvr;
+			}
 		}
 
 		if (msm->ext_xceiv.otg_capability)
@@ -2346,7 +2636,20 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 			goto put_xcvr;
 		}
 	} else {
-		dev_err(&pdev->dev, "%s: No OTG transceiver found\n", __func__);
+		dev_dbg(&pdev->dev, "No OTG, DWC3 running in host only mode\n");
+		msm->host_mode = 1;
+		msm->vbus_otg = devm_regulator_get(&pdev->dev, "vbus_dwc3");
+		if (IS_ERR(msm->vbus_otg)) {
+			dev_dbg(&pdev->dev, "Failed to get vbus regulator\n");
+			msm->vbus_otg = 0;
+		} else {
+			ret = regulator_enable(msm->vbus_otg);
+			if (ret) {
+				msm->vbus_otg = 0;
+				dev_err(&pdev->dev, "Failed to enable vbus_otg\n");
+			}
+		}
+		msm->otg_xceiv = NULL;
 	}
 
 	wake_lock_init(&msm->wlock, WAKE_LOCK_SUSPEND, "msm_dwc3");
@@ -2357,14 +2660,9 @@ static int __devinit dwc3_msm_probe(struct platform_device *pdev)
 
 put_xcvr:
 	usb_put_transceiver(msm->otg_xceiv);
-	platform_device_del(dwc3);
 put_psupply:
-	power_supply_unregister(&msm->usb_psy);
-put_pdev:
-	platform_device_put(dwc3);
-free_hsphy_irq:
-	if (msm->hs_phy_irq)
-		free_irq(msm->hs_phy_irq, msm);
+	if (msm->usb_psy.dev)
+		power_supply_unregister(&msm->usb_psy);
 disable_hs_ldo:
 	dwc3_hsusb_ldo_enable(0);
 free_hs_ldo_init:
@@ -2383,6 +2681,8 @@ unconfig_ss_vddcx:
 	dwc3_ssusb_config_vddcx(0);
 disable_ref_clk:
 	clk_disable_unprepare(msm->ref_clk);
+disable_utmi_clk:
+	clk_disable_unprepare(msm->utmi_clk);
 disable_sleep_a_clk:
 	clk_disable_unprepare(msm->hsphy_sleep_clk);
 disable_sleep_clk:
@@ -2391,8 +2691,10 @@ disable_iface_clk:
 	clk_disable_unprepare(msm->iface_clk);
 disable_core_clk:
 	clk_disable_unprepare(msm->core_clk);
-free_xo_handle:
-	msm_xo_put(msm->xo_handle);
+disable_xo:
+	clk_disable_unprepare(msm->xo_clk);
+put_xo:
+	clk_put(msm->xo_clk);
 
 	return ret;
 }
@@ -2409,9 +2711,12 @@ static int __devexit dwc3_msm_remove(struct platform_device *pdev)
 		dwc3_start_chg_det(&msm->charger, false);
 		usb_put_transceiver(msm->otg_xceiv);
 	}
+	if (msm->usb_psy.dev)
+		power_supply_unregister(&msm->usb_psy);
+	if (msm->vbus_otg)
+		regulator_disable(msm->vbus_otg);
 
 	pm_runtime_disable(msm->dev);
-	platform_device_unregister(msm->dwc3);
 	wake_lock_destroy(&msm->wlock);
 
 	dwc3_hsusb_ldo_enable(0);
@@ -2427,7 +2732,8 @@ static int __devexit dwc3_msm_remove(struct platform_device *pdev)
 	clk_disable_unprepare(msm->sleep_clk);
 	clk_disable_unprepare(msm->hsphy_sleep_clk);
 	clk_disable_unprepare(msm->ref_clk);
-	msm_xo_put(msm->xo_handle);
+	clk_disable_unprepare(msm->xo_clk);
+	clk_put(msm->xo_clk);
 
 	return 0;
 }
@@ -2438,6 +2744,12 @@ static int dwc3_msm_pm_suspend(struct device *dev)
 	struct dwc3_msm *mdwc = dev_get_drvdata(dev);
 
 	dev_dbg(dev, "dwc3-msm PM suspend\n");
+
+	flush_delayed_work_sync(&mdwc->resume_work);
+	if (!atomic_read(&mdwc->in_lpm)) {
+		dev_err(mdwc->dev, "Abort PM suspend!! (USB is outside LPM)\n");
+		return -EBUSY;
+	}
 
 	ret = dwc3_msm_suspend(mdwc);
 	if (!ret)

@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,7 +29,7 @@
 #include <sound/pcm_params.h>
 #include <asm/dma.h>
 #include <linux/dma-mapping.h>
-#include <linux/android_pmem.h>
+
 #include <sound/timer.h>
 #include <mach/qdsp6v2/q6core.h>
 #include <sound/pcm.h>
@@ -788,7 +788,7 @@ static int msm_compr_open(struct snd_pcm_substream *substream)
 	runtime->private_data = compr;
 	atomic_set(&prtd->eos, 0);
 	compressed_audio.prtd =  &compr->prtd;
-	ret = compressed_set_volume(compressed_audio.volume);
+	ret = compressed_set_volume(0);
 	if (ret < 0)
 		pr_err("%s : Set Volume failed : %d", __func__, ret);
 
@@ -1137,11 +1137,10 @@ static int msm_compr_ioctl(struct snd_pcm_substream *substream,
 		pr_debug("SNDRV_COMPRESS_TSTAMP\n");
 
 		memset(&tstamp, 0x0, sizeof(struct snd_compr_tstamp));
-		timestamp = q6asm_get_session_time(prtd->audio_client);
-		if (timestamp < 0) {
-			pr_err("%s: Get Session Time return value =%lld\n",
-				__func__, timestamp);
-			return -EAGAIN;
+		rc = q6asm_get_session_time(prtd->audio_client, &timestamp);
+		if (rc < 0) {
+			pr_err("%s: fail to get session tstamp\n", __func__);
+			return rc;
 		}
 		temp = (timestamp * 2 * runtime->channels);
 		temp = temp * (runtime->rate/1000);
@@ -1303,7 +1302,7 @@ static int msm_compr_ioctl(struct snd_pcm_substream *substream,
 			}
 			rc = wait_event_timeout(the_locks.flush_wait,
 				prtd->cmd_ack, 5 * HZ);
-			if (rc < 0)
+			if (!rc)
 				pr_err("Flush cmd timeout\n");
 			prtd->pcm_irq_pos = 0;
 		}

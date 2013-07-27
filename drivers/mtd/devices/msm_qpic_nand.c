@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,8 +28,9 @@
 #include <linux/bitrev.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/ctype.h>
 #include <mach/sps.h>
-
+#include <mach/msm_smem.h>
 #define PAGE_SIZE_2K 2048
 #define PAGE_SIZE_4K 4096
 #define WRITE 1
@@ -88,6 +89,7 @@
 
 /* QPIC NANDc (NAND Controller) Register Set */
 #define MSM_NAND_REG(info, off)		    (info->nand_phys + off)
+#define MSM_NAND_QPIC_VERSION(info)	    MSM_NAND_REG(info, 0x20100)
 #define MSM_NAND_FLASH_CMD(info)	    MSM_NAND_REG(info, 0x30000)
 #define MSM_NAND_ADDR0(info)                MSM_NAND_REG(info, 0x30004)
 #define MSM_NAND_ADDR1(info)                MSM_NAND_REG(info, 0x30008)
@@ -137,7 +139,7 @@
 
 #define MSM_NAND_CTRL(info)		    MSM_NAND_REG(info, 0x30F00)
 #define BAM_MODE_EN	0
-
+#define MSM_NAND_VERSION(info)         MSM_NAND_REG(info, 0x30F08)
 #define MSM_NAND_READ_LOCATION_0(info)      MSM_NAND_REG(info, 0x30F20)
 #define MSM_NAND_READ_LOCATION_1(info)      MSM_NAND_REG(info, 0x30F24)
 
@@ -150,6 +152,12 @@
 #define MSM_NAND_CMD_PRG_PAGE_ALL       0x39
 #define MSM_NAND_CMD_BLOCK_ERASE        0x3A
 #define MSM_NAND_CMD_FETCH_ID           0x0B
+
+/* Version Mask */
+#define MSM_NAND_VERSION_MAJOR_MASK	0xF0000000
+#define MSM_NAND_VERSION_MAJOR_SHIFT	28
+#define MSM_NAND_VERSION_MINOR_MASK	0x0FFF0000
+#define MSM_NAND_VERSION_MINOR_SHIFT	16
 
 /* Structure that defines a NAND SPS command element */
 struct msm_nand_sps_cmd {
@@ -284,6 +292,34 @@ struct onfi_param_page {
 	uint8_t  vendor_specific[88];
 	uint16_t integrity_crc;
 } __attribute__((__packed__));
+
+#define FLASH_PART_MAGIC1	0x55EE73AA
+#define FLASH_PART_MAGIC2	0xE35EBDDB
+#define FLASH_PTABLE_V3		3
+#define FLASH_PTABLE_V4		4
+#define FLASH_PTABLE_MAX_PARTS_V3 16
+#define FLASH_PTABLE_MAX_PARTS_V4 32
+#define FLASH_PTABLE_HDR_LEN (4*sizeof(uint32_t))
+#define FLASH_PTABLE_ENTRY_NAME_SIZE 16
+
+struct flash_partition_entry {
+	char name[FLASH_PTABLE_ENTRY_NAME_SIZE];
+	u32 offset;     /* Offset in blocks from beginning of device */
+	u32 length;     /* Length of the partition in blocks */
+	u8 attr;	/* Flags for this partition */
+};
+
+struct flash_partition_table {
+	u32 magic1;
+	u32 magic2;
+	u32 version;
+	u32 numparts;
+	struct flash_partition_entry part_entry[FLASH_PTABLE_MAX_PARTS_V4];
+};
+
+static struct flash_partition_table ptable;
+
+static struct mtd_partition mtd_part[FLASH_PTABLE_MAX_PARTS_V4];
 
 /*
  * Get the DMA memory for requested amount of size. It returns the pointer
@@ -594,6 +630,48 @@ struct msm_nand_flash_onfi_data {
 	uint32_t ecc_bch_cfg;
 };
 
+struct version {
+	uint16_t nand_major;
+	uint16_t nand_minor;
+	uint16_t qpic_major;
+	uint16_t qpic_minor;
+};
+
+static int msm_nand_version_check(struct msm_nand_info *info,
+			struct version *nandc_version)
+{
+	uint32_t qpic_ver = 0, nand_ver = 0;
+	int err = 0;
+
+	/* Lookup the version to identify supported features */
+	err = msm_nand_flash_rd_reg(info, MSM_NAND_VERSION(info),
+		&nand_ver);
+	if (err) {
+		pr_err("Failed to read NAND_VERSION, err=%d\n", err);
+		goto out;
+	}
+	nandc_version->nand_major = (nand_ver & MSM_NAND_VERSION_MAJOR_MASK) >>
+		MSM_NAND_VERSION_MAJOR_SHIFT;
+	nandc_version->nand_minor = (nand_ver & MSM_NAND_VERSION_MINOR_MASK) >>
+		MSM_NAND_VERSION_MINOR_SHIFT;
+
+	err = msm_nand_flash_rd_reg(info, MSM_NAND_QPIC_VERSION(info),
+		&qpic_ver);
+	if (err) {
+		pr_err("Failed to read QPIC_VERSION, err=%d\n", err);
+		goto out;
+	}
+	nandc_version->qpic_major = (qpic_ver & MSM_NAND_VERSION_MAJOR_MASK) >>
+			MSM_NAND_VERSION_MAJOR_SHIFT;
+	nandc_version->qpic_minor = (qpic_ver & MSM_NAND_VERSION_MINOR_MASK) >>
+			MSM_NAND_VERSION_MINOR_SHIFT;
+	pr_info("nand_major:%d, nand_minor:%d, qpic_major:%d, qpic_minor:%d\n",
+		nandc_version->nand_major, nandc_version->nand_minor,
+		nandc_version->qpic_major, nandc_version->qpic_minor);
+out:
+	return err;
+}
+
 /*
  * Function to identify whether the attached NAND flash device is
  * complaint to ONFI spec or not. If yes, then it reads the ONFI parameter
@@ -632,6 +710,18 @@ static int msm_nand_flash_onfi_probe(struct msm_nand_info *info)
 		uint32_t flash_status;
 	} *dma_buffer;
 
+
+	/* Lookup the version to identify supported features */
+	struct version nandc_version = {0};
+
+	ret = msm_nand_version_check(info, &nandc_version);
+	if (!ret && !(nandc_version.nand_major == 1 &&
+			nandc_version.nand_minor == 1 &&
+			nandc_version.qpic_major == 1 &&
+			nandc_version.qpic_minor == 1)) {
+		ret = -EPERM;
+		goto out;
+	}
 	wait_event(chip->dma_wait_queue, (onfi_param_info_buf =
 		msm_nand_get_dma_buffer(chip, ONFI_PARAM_INFO_LENGTH)));
 	dma_addr_param_info = msm_virt_to_dma(chip, onfi_param_info_buf);
@@ -660,6 +750,14 @@ static int msm_nand_flash_onfi_probe(struct msm_nand_info *info)
 	if (ret < 0)
 		goto free_dma;
 
+	/* Lookup the 'APPS' partition's first page address */
+	for (i = 0; i < FLASH_PTABLE_MAX_PARTS_V4; i++) {
+		if (!strncmp("apps", mtd_part[i].name,
+				strlen(mtd_part[i].name))) {
+			page_address = mtd_part[i].offset << 6;
+			break;
+		}
+	}
 	data.cfg.cmd = MSM_NAND_CMD_PAGE_READ_ALL;
 	data.exec = 1;
 	data.cfg.addr0 = (page_address << 16) |
@@ -802,6 +900,7 @@ free_dma:
 	msm_nand_release_dma_buffer(chip, dma_buffer, sizeof(*dma_buffer));
 	msm_nand_release_dma_buffer(chip, onfi_param_info_buf,
 			ONFI_PARAM_INFO_LENGTH);
+out:
 	return ret;
 }
 
@@ -1421,7 +1520,7 @@ static int msm_nand_read(struct mtd_info *mtd, loff_t from, size_t len,
 	int ret;
 	struct mtd_oob_ops ops;
 
-	ops.mode = MTD_OPS_PLACE_OOB;
+	ops.mode = MTD_OPS_AUTO_OOB;
 	ops.len = len;
 	ops.retlen = 0;
 	ops.ooblen = 0;
@@ -1606,7 +1705,7 @@ static int msm_nand_write(struct mtd_info *mtd, loff_t to, size_t len,
 	int ret;
 	struct mtd_oob_ops ops;
 
-	ops.mode = MTD_OPS_PLACE_OOB;
+	ops.mode = MTD_OPS_AUTO_OOB;
 	ops.len = len;
 	ops.retlen = 0;
 	ops.ooblen = 0;
@@ -2264,19 +2363,22 @@ static int msm_nand_bam_init(struct msm_nand_info *nand_info)
 	 */
 	bam.manage = SPS_BAM_MGR_DEVICE_REMOTE | SPS_BAM_MGR_MULTI_EE;
 
+	rc = sps_phy2h(bam.phys_addr, &nand_info->sps.bam_handle);
+	if (!rc)
+		goto init_sps_ep;
 	rc = sps_register_bam_device(&bam, &nand_info->sps.bam_handle);
 	if (rc) {
-		pr_err("sps_register_bam_device() failed with %d\n", rc);
+		pr_err("%s: sps_register_bam_device() failed with %d\n",
+			__func__, rc);
 		goto out;
 	}
-	pr_info("BAM device registered: bam_handle 0x%x\n",
-			nand_info->sps.bam_handle);
-
+	pr_info("%s: BAM device registered: bam_handle 0x%x\n",
+			__func__, nand_info->sps.bam_handle);
+init_sps_ep:
 	rc = msm_nand_init_endpoint(nand_info, &nand_info->sps.data_prod,
 					SPS_DATA_PROD_PIPE_INDEX);
 	if (rc)
-		goto unregister_bam;
-
+		goto out;
 	rc = msm_nand_init_endpoint(nand_info, &nand_info->sps.data_cons,
 					SPS_DATA_CONS_PIPE_INDEX);
 	if (rc)
@@ -2291,22 +2393,20 @@ deinit_data_cons:
 	msm_nand_deinit_endpoint(nand_info, &nand_info->sps.data_cons);
 deinit_data_prod:
 	msm_nand_deinit_endpoint(nand_info, &nand_info->sps.data_prod);
-unregister_bam:
-	sps_deregister_bam_device(nand_info->sps.bam_handle);
 out:
 	return rc;
 }
 
 /*
- * This function de-registers BAM device, disconnects and frees its end points
- * for all the pipes.
+ * This function disconnects and frees its end points for all the pipes.
+ * Since the BAM is shared resource, it is not deregistered as its handle
+ * might be in use with LCDC.
  */
 static void msm_nand_bam_free(struct msm_nand_info *nand_info)
 {
 	msm_nand_deinit_endpoint(nand_info, &nand_info->sps.data_prod);
 	msm_nand_deinit_endpoint(nand_info, &nand_info->sps.data_cons);
 	msm_nand_deinit_endpoint(nand_info, &nand_info->sps.cmd_pipe);
-	sps_deregister_bam_device(nand_info->sps.bam_handle);
 }
 
 /* This function enables DMA support for the NANDc in BAM mode. */
@@ -2337,6 +2437,75 @@ out:
 
 }
 
+#ifdef CONFIG_MSM_SMD
+static int msm_nand_parse_smem_ptable(int *nr_parts)
+{
+
+	uint32_t  i, j;
+	uint32_t len = FLASH_PTABLE_HDR_LEN;
+	struct flash_partition_entry *pentry;
+	char *delimiter = ":";
+
+	pr_info("Parsing partition table info from SMEM\n");
+	/* Read only the header portion of ptable */
+	ptable = *(struct flash_partition_table *)
+			(smem_get_entry(SMEM_AARM_PARTITION_TABLE, &len));
+	/* Verify ptable magic */
+	if (ptable.magic1 != FLASH_PART_MAGIC1 ||
+			ptable.magic2 != FLASH_PART_MAGIC2) {
+		pr_err("Partition table magic verification failed\n");
+		goto out;
+	}
+	/* Ensure that # of partitions is less than the max we have allocated */
+	if (ptable.numparts > FLASH_PTABLE_MAX_PARTS_V4) {
+		pr_err("Partition numbers exceed the max limit\n");
+		goto out;
+	}
+	/* Find out length of partition data based on table version. */
+	if (ptable.version <= FLASH_PTABLE_V3) {
+		len = FLASH_PTABLE_HDR_LEN + FLASH_PTABLE_MAX_PARTS_V3 *
+			sizeof(struct flash_partition_entry);
+	} else if (ptable.version == FLASH_PTABLE_V4) {
+		len = FLASH_PTABLE_HDR_LEN + FLASH_PTABLE_MAX_PARTS_V4 *
+			sizeof(struct flash_partition_entry);
+	} else {
+		pr_err("Unknown ptable version (%d)", ptable.version);
+		goto out;
+	}
+
+	*nr_parts = ptable.numparts;
+	ptable = *(struct flash_partition_table *)
+			(smem_get_entry(SMEM_AARM_PARTITION_TABLE, &len));
+	for (i = 0; i < ptable.numparts; i++) {
+		pentry = &ptable.part_entry[i];
+		if (pentry->name == '\0')
+			continue;
+		/* Convert name to lower case and discard the initial chars */
+		mtd_part[i].name        = pentry->name;
+		for (j = 0; j < strlen(mtd_part[i].name); j++)
+			*(mtd_part[i].name + j) =
+				tolower(*(mtd_part[i].name + j));
+		strsep(&(mtd_part[i].name), delimiter);
+		mtd_part[i].offset      = pentry->offset;
+		mtd_part[i].mask_flags  = pentry->attr;
+		mtd_part[i].size        = pentry->length;
+		pr_debug("%d: %s offs=0x%08x size=0x%08x attr:0x%08x\n",
+			i, pentry->name, pentry->offset, pentry->length,
+			pentry->attr);
+	}
+	pr_info("SMEM partition table found: ver: %d len: %d\n",
+		ptable.version, ptable.numparts);
+	return 0;
+out:
+	return -EINVAL;
+}
+#else
+static int msm_nand_parse_smem_ptable(int *nr_parts)
+{
+	return -ENODEV;
+}
+#endif
+
 /*
  * This function gets called when its device named msm-nand is added to
  * device tree .dts file with all its resources such as physical addresses
@@ -2351,26 +2520,13 @@ static int __devinit msm_nand_probe(struct platform_device *pdev)
 {
 	struct msm_nand_info *info;
 	struct resource *res;
-	int err;
-	struct device_node *pnode;
-	struct mtd_part_parser_data parser_data;
-
-	if (!pdev->dev.of_node) {
-		pr_err("No valid device tree info for NANDc\n");
-		err = -ENODEV;
-		goto out;
-	}
+	int i, err, nr_parts;
 
 	/*
 	 * The partition information can also be passed from kernel command
 	 * line. Also, the MTD core layer supports adding the whole device as
 	 * one MTD device when no partition information is available at all.
-	 * Hence, do not bail out when partition information is not availabe
-	 * in device tree.
 	 */
-	pnode = of_find_node_by_path("/qcom,mtd-partitions");
-	if (!pnode)
-		pr_info("No partition info available in device tree\n");
 	info = devm_kzalloc(&pdev->dev, sizeof(struct msm_nand_info),
 				GFP_KERNEL);
 	if (!info) {
@@ -2378,7 +2534,6 @@ static int __devinit msm_nand_probe(struct platform_device *pdev)
 		err = -ENOMEM;
 		goto out;
 	}
-
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 						"nand_phys");
 	if (!res || !res->start) {
@@ -2437,14 +2592,22 @@ static int __devinit msm_nand_probe(struct platform_device *pdev)
 		pr_err("Failed to enable DMA in NANDc\n");
 		goto free_bam;
 	}
+	err = msm_nand_parse_smem_ptable(&nr_parts);
+	if (err < 0) {
+		pr_err("Failed to parse partition table in SMEM\n");
+		goto free_bam;
+	}
 	if (msm_nand_scan(&info->mtd)) {
 		pr_err("No nand device found\n");
 		err = -ENXIO;
 		goto free_bam;
 	}
-	parser_data.of_node = pnode;
-	err = mtd_device_parse_register(&info->mtd, NULL, &parser_data,
-					NULL, 0);
+	for (i = 0; i < nr_parts; i++) {
+		mtd_part[i].offset *= info->mtd.erasesize;
+		mtd_part[i].size *= info->mtd.erasesize;
+	}
+	err = mtd_device_parse_register(&info->mtd, NULL, NULL,
+		&mtd_part[0], nr_parts);
 	if (err < 0) {
 		pr_err("Unable to register MTD partitions %d\n", err);
 		goto free_bam;

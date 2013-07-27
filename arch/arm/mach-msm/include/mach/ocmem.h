@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -134,6 +134,9 @@ int ocmem_map(int client_id, struct ocmem_buf *buffer,
 
 
 int ocmem_unmap(int client_id, struct ocmem_buf *buffer,
+			struct ocmem_map_list *list);
+
+int ocmem_drop(int client_id, struct ocmem_buf *buffer,
 			struct ocmem_map_list *list);
 
 int ocmem_dump(int client_id, struct ocmem_buf *buffer,

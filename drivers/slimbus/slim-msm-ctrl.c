@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -37,8 +37,6 @@
 #define QC_DEVID_SAT2	0x4
 #define QC_DEVID_PGD	0x5
 #define QC_MSM_DEVS	5
-#define INIT_MX_RETRIES 10
-#define DEF_RETRY_MS	10
 
 /* Manager registers */
 enum mgr_reg {
@@ -263,6 +261,17 @@ static irqreturn_t msm_slim_interrupt(int irq, void *d)
 			 */
 			mb();
 			complete(&dev->rx_msgq_notify);
+		} else if (mt == SLIM_MSG_MT_CORE &&
+			mc == SLIM_MSG_MC_REPORT_ABSENT) {
+			writel_relaxed(MGR_INT_RX_MSG_RCVD, dev->base +
+						MGR_INT_CLR);
+			/*
+			 * Guarantee that CLR bit write goes through
+			 * before signalling completion
+			 */
+			mb();
+			complete(&dev->rx_msgq_notify);
+
 		} else if (mc == SLIM_MSG_MC_REPLY_INFORMATION ||
 				mc == SLIM_MSG_MC_REPLY_VALUE) {
 			msm_slim_rx_enqueue(dev, rx_buf, len);
@@ -975,6 +984,10 @@ send_capability:
 			txn.wbuf = wbuf;
 			gen_ack = true;
 			ret = msm_xfer_msg(&dev->ctrl, &txn);
+			break;
+		case SLIM_MSG_MC_REPORT_ABSENT:
+			dev_info(dev->dev, "Received Report Absent Message\n");
+			break;
 		default:
 			break;
 		}
@@ -1061,7 +1074,7 @@ static int msm_slim_rx_msgq_thread(void *data)
 			dev_err(dev->dev, "rx thread wait error:%d", ret);
 
 		/* 1 irq notification per message */
-		if (!dev->use_rx_msgqs) {
+		if (dev->use_rx_msgqs != MSM_MSGQ_ENABLED) {
 			msm_slim_rxwq(dev);
 			continue;
 		}
@@ -1087,7 +1100,8 @@ static int msm_slim_rx_msgq_thread(void *data)
 				laddr = (u8)((buffer[0] >> 16) & 0xff);
 				sat = addr_to_sat(dev, laddr);
 			}
-		} else if ((index * 4) >= msg_len) {
+		}
+		if ((index * 4) >= msg_len) {
 			index = 0;
 			if (sat) {
 				msm_sat_enqueue(sat, buffer, msg_len);
@@ -1255,9 +1269,9 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 	spin_lock_init(&dev->rx_lock);
 	dev->ee = 1;
 	if (rxreg_access)
-		dev->use_rx_msgqs = 0;
+		dev->use_rx_msgqs = MSM_MSGQ_DISABLED;
 	else
-		dev->use_rx_msgqs = 1;
+		dev->use_rx_msgqs = MSM_MSGQ_RESET;
 
 	dev->irq = irq->start;
 	dev->bam.irq = bam_irq->start;
@@ -1328,7 +1342,7 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 	 * Manager register initialization
 	 * If RX msg Q is used, disable RX_MSG_RCVD interrupt
 	 */
-	if (dev->use_rx_msgqs)
+	if (dev->use_rx_msgqs == MSM_MSGQ_ENABLED)
 		writel_relaxed((MGR_INT_RECFG_DONE | MGR_INT_TX_NACKED_2 |
 			MGR_INT_MSG_BUF_CONTE | /* MGR_INT_RX_MSG_RCVD | */
 			MGR_INT_TX_MSG_SENT), dev->base + MGR_INT_EN);
@@ -1357,7 +1371,7 @@ static int __devinit msm_slim_probe(struct platform_device *pdev)
 	mb();
 
 	/* Enable RX msg Q */
-	if (dev->use_rx_msgqs)
+	if (dev->use_rx_msgqs == MSM_MSGQ_ENABLED)
 		writel_relaxed(MGR_CFG_ENABLE | MGR_CFG_RX_MSGQ_EN,
 					dev->base + MGR_CFG);
 	else
@@ -1409,7 +1423,7 @@ err_clk_get_failed:
 err_request_irq_failed:
 	kthread_stop(dev->rx_msgq_thread);
 err_thread_create_failed:
-	msm_slim_sps_exit(dev);
+	msm_slim_sps_exit(dev, true);
 err_sps_init_failed:
 	if (dev->hclk) {
 		clk_disable_unprepare(dev->hclk);
@@ -1453,7 +1467,7 @@ static int __devexit msm_slim_remove(struct platform_device *pdev)
 	clk_put(dev->rclk);
 	if (dev->hclk)
 		clk_put(dev->hclk);
-	msm_slim_sps_exit(dev);
+	msm_slim_sps_exit(dev, true);
 	kthread_stop(dev->rx_msgq_thread);
 	iounmap(dev->bam.base);
 	iounmap(dev->base);

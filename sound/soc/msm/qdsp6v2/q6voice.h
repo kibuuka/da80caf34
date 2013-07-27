@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,6 +14,7 @@
 
 #include <mach/qdsp6v2/apr.h>
 #include <linux/msm_ion.h>
+#include <sound/voice_params.h>
 
 #define MAX_VOC_PKT_SIZE 642
 #define SESSION_NAME_LEN 20
@@ -41,11 +42,15 @@ struct voice_init {
 	void *cb_handle;
 };
 
-/* Device information payload structure */
+/* Stream information payload structure */
+struct stream_data {
+	uint32_t stream_mute;
+};
 
+/* Device information payload structure */
 struct device_data {
 	uint32_t volume; /* in index */
-	uint32_t mute;
+	uint32_t dev_mute;
 	uint32_t sample;
 	uint32_t enabled;
 	uint32_t dev_id;
@@ -194,9 +199,6 @@ struct vss_unmap_memory_cmd {
 #define VSS_ICOMMON_CMD_SET_VOICE_TIMING		0x000111E0
 /* Set the voice timing parameters. */
 
-#define VSS_IWIDEVOICE_CMD_SET_WIDEVOICE                0x00011243
-/* Enable/disable WideVoice */
-
 #define VSS_IMEMORY_CMD_MAP_PHYSICAL			0x00011334
 #define VSS_IMEMORY_RSP_MAP				0x00011336
 #define VSS_IMEMORY_CMD_UNMAP				0x00011337
@@ -291,14 +293,6 @@ struct vss_imvm_cmd_set_policy_dual_control_t {
 	/* Set to TRUE to enable modem state machine control */
 } __packed;
 
-struct vss_iwidevoice_cmd_set_widevoice_t {
-	uint32_t enable;
-	/* WideVoice enable/disable; possible values:
-	* - 0 -- WideVoice disabled
-	* - 1 -- WideVoice enabled
-	*/
-} __packed;
-
 struct mvm_attach_vocproc_cmd {
 	struct apr_hdr hdr;
 	struct vss_istream_cmd_attach_vocproc_t mvm_attach_cvp_handle;
@@ -342,11 +336,6 @@ struct mvm_set_network_cmd {
 struct mvm_set_voice_timing_cmd {
 	struct apr_hdr hdr;
 	struct vss_icommon_cmd_set_voice_timing_t timing;
-} __packed;
-
-struct mvm_set_widevoice_enable_cmd {
-	struct apr_hdr hdr;
-	struct vss_iwidevoice_cmd_set_widevoice_t vss_set_wv;
 } __packed;
 
 struct vss_imemory_table_descriptor_t {
@@ -484,16 +473,18 @@ struct vss_imemory_cmd_unmap_t {
 #define VSS_ISTREAM_CMD_SET_ENC_DTX_MODE		0x0001101D
 /* Set encoder DTX mode. */
 
-#define MODULE_ID_VOICE_MODULE_FENS			0x00010EEB
 #define MODULE_ID_VOICE_MODULE_ST			0x00010EE3
 #define VOICE_PARAM_MOD_ENABLE				0x00010E00
 #define MOD_ENABLE_PARAM_LEN				4
 
-#define VSS_ISTREAM_CMD_START_PLAYBACK                  0x00011238
+#define VSS_IPLAYBACK_CMD_START				0x000112BD
 /* Start in-call music delivery on the Tx voice path. */
 
-#define VSS_ISTREAM_CMD_STOP_PLAYBACK                   0x00011239
+#define VSS_IPLAYBACK_CMD_STOP				0x00011239
 /* Stop the in-call music delivery on the Tx voice path. */
+
+#define VSS_IPLAYBACK_PORT_ID_DEFAULT			0x0000FFFF
+/* Default AFE port ID. */
 
 #define VSS_IRECORD_CMD_START				0x000112BE
 /* Start in-call conversation recording. */
@@ -537,6 +528,15 @@ struct vss_imemory_cmd_unmap_t {
 /* Out-of-band packet exchange mode. */
 
 #define VSS_ISTREAM_CMD_SET_PACKET_EXCHANGE_MODE	0x0001136A
+
+struct vss_iplayback_cmd_start_t {
+	uint16_t port_id;
+	/*
+	 * AFE Port ID from which the audio samples are available.
+	 * To use the default AFE pseudo port (0x8005), set this value to
+	 * #VSS_IPLAYBACK_PORT_ID_DEFAULT.
+	 */
+}  __packed;
 
 struct vss_irecord_cmd_start_t {
 	uint32_t rx_tap_point;
@@ -741,6 +741,56 @@ struct vss_icommon_cmd_set_ui_property_enable_t {
 	/* Reserved, set to 0. */
 };
 
+/*
+ * Event sent by the stream to the client that enables Rx DTMF
+ * detection whenever DTMF is detected in the Rx path.
+ *
+ * The DTMF detection feature can only be used to detect DTMF
+ * frequencies as listed in the vss_istream_evt_rx_dtmf_detected_t
+ * structure.
+ */
+
+#define VSS_ISTREAM_EVT_RX_DTMF_DETECTED (0x0001101A)
+
+struct vss_istream_cmd_set_rx_dtmf_detection {
+	/*
+	 * Enables/disables Rx DTMF detection
+	 *
+	 * Possible values are
+	 * 0 - disable
+	 * 1 - enable
+	 *
+	 */
+	uint32_t enable;
+};
+
+#define VSS_ISTREAM_CMD_SET_RX_DTMF_DETECTION (0x00011027)
+
+struct vss_istream_evt_rx_dtmf_detected {
+	uint16_t low_freq;
+	/*
+	 * Detected low frequency. Possible values:
+	 * 697 Hz
+	 * 770 Hz
+	 * 852 Hz
+	 * 941 Hz
+	 */
+	uint16_t high_freq;
+	/*
+	 * Detected high frequency. Possible values:
+	 * 1209 Hz
+	 * 1336 Hz
+	 * 1477 Hz
+	 * 1633 Hz
+	 */
+};
+
+struct cvs_set_rx_dtmf_detection_cmd {
+	struct apr_hdr hdr;
+	struct vss_istream_cmd_set_rx_dtmf_detection cvs_dtmf_det;
+} __packed;
+
+
 struct cvs_create_passive_ctl_session_cmd {
 	struct apr_hdr hdr;
 	struct vss_istream_cmd_create_passive_control_session_t cvs_session;
@@ -808,6 +858,11 @@ struct cvs_start_record_cmd {
 	struct vss_irecord_cmd_start_t rec_mode;
 } __packed;
 
+struct cvs_start_playback_cmd {
+	struct apr_hdr hdr;
+	struct vss_iplayback_cmd_start_t playback_mode;
+} __packed;
+
 struct cvs_dec_buffer_ready_cmd {
 	struct apr_hdr hdr;
 } __packed;
@@ -837,7 +892,7 @@ struct vss_istream_cmd_set_packet_exchange_mode_t {
 
 #define APRV2_IBASIC_CMD_DESTROY_SESSION		0x0001003C
 
-#define VSS_IVOCPROC_CMD_SET_DEVICE			0x000100C4
+#define VSS_IVOCPROC_CMD_SET_DEVICE_V2			0x000112C6
 
 #define VSS_IVOCPROC_CMD_SET_VP3_DATA			0x000110EB
 
@@ -975,8 +1030,8 @@ struct vss_ivocproc_cmd_set_volume_index_t {
 	 */
 } __packed;
 
-struct vss_ivocproc_cmd_set_device_t {
-	uint32_t tx_port_id;
+struct vss_ivocproc_cmd_set_device_v2_t {
+	uint16_t tx_port_id;
 	/*
 	 * TX device port ID which vocproc will connect to.
 	 * VSS_IVOCPROC_PORT_ID_NONE means vocproc will not connect to any port.
@@ -987,7 +1042,7 @@ struct vss_ivocproc_cmd_set_device_t {
 	 * VSS_IVOCPROC_TOPOLOGY_ID_NONE means vocproc does not contain any
 	 * pre/post-processing blocks and is pass-through.
 	 */
-	int32_t rx_port_id;
+	uint16_t rx_port_id;
 	/*
 	 * RX device port ID which vocproc will connect to.
 	 * VSS_IVOCPROC_PORT_ID_NONE means vocproc will not connect to any port.
@@ -997,6 +1052,15 @@ struct vss_ivocproc_cmd_set_device_t {
 	 * RX leg topology ID.
 	 * VSS_IVOCPROC_TOPOLOGY_ID_NONE means vocproc does not contain any
 	 * pre/post-processing blocks and is pass-through.
+	 */
+	uint32_t vocproc_mode;
+	/* Vocproc mode. The supported values:
+	 * VSS_IVOCPROC_VOCPROC_MODE_EC_INT_MIXING - 0x00010F7C
+	 * VSS_IVOCPROC_VOCPROC_MODE_EC_EXT_MIXING - 0x00010F7D
+	 */
+	uint16_t ec_ref_port_id;
+	/* Port ID to which the vocproc connects for receiving
+	 * echo
 	 */
 } __packed;
 
@@ -1061,7 +1125,7 @@ struct cvp_command {
 
 struct cvp_set_device_cmd {
 	struct apr_hdr hdr;
-	struct vss_ivocproc_cmd_set_device_t cvp_set_device;
+	struct vss_ivocproc_cmd_set_device_v2_t cvp_set_device_v2;
 } __packed;
 
 struct cvp_set_vp3_data_cmd {
@@ -1114,6 +1178,10 @@ typedef void (*ul_cb_fn)(uint8_t *voc_pkt,
 typedef void (*dl_cb_fn)(uint8_t *voc_pkt,
 			 void *private_data);
 
+/* CB for DTMF RX Detection */
+typedef void (*dtmf_rx_det_cb_fn)(uint8_t *pkt,
+				  char *session,
+				  void *private_data);
 
 struct mvs_driver_info {
 	uint32_t media_type;
@@ -1122,6 +1190,11 @@ struct mvs_driver_info {
 	uint32_t dtx_mode;
 	ul_cb_fn ul_cb;
 	dl_cb_fn dl_cb;
+	void *private_data;
+};
+
+struct dtmf_driver_info {
+	dtmf_rx_det_cb_fn dtmf_rx_ul_cb;
 	void *private_data;
 };
 
@@ -1154,9 +1227,13 @@ struct voice_data {
 	wait_queue_head_t cvs_wait;
 	wait_queue_head_t cvp_wait;
 
-	/* cache the values related to Rx and Tx */
+	/* Cache the values related to Rx and Tx devices */
 	struct device_data dev_rx;
 	struct device_data dev_tx;
+
+	/* Cache the values related to Rx and Tx streams */
+	struct stream_data stream_rx;
+	struct stream_data stream_tx;
 
 	u32 mvm_state;
 	u32 cvs_state;
@@ -1173,12 +1250,11 @@ struct voice_data {
 
 	uint16_t sidetone_gain;
 	uint8_t tty_mode;
-	/* widevoice enable value */
-	uint8_t wv_enable;
 	/* slowtalk enable value */
 	uint32_t st_enable;
-	/* FENC enable value */
-	uint32_t fens_enable;
+	uint32_t dtmf_rx_detect_en;
+	/* Local Call Hold mode */
+	uint8_t lch_mode;
 
 	struct voice_dev_route_state voc_route_state;
 
@@ -1197,7 +1273,7 @@ struct cal_mem {
 	void *buf;
 };
 
-#define MAX_VOC_SESSIONS 3
+#define MAX_VOC_SESSIONS 4
 #define SESSION_ID_BASE 0xFFF0
 
 struct common_data {
@@ -1222,12 +1298,17 @@ struct common_data {
 
 	struct mvs_driver_info mvs_info;
 
+	struct dtmf_driver_info dtmf_info;
+
 	struct voice_data voice[MAX_VOC_SESSIONS];
 };
 
 void voc_register_mvs_cb(ul_cb_fn ul_cb,
 			dl_cb_fn dl_cb,
 			void *private_data);
+
+void voc_register_dtmf_rx_detection_cb(dtmf_rx_det_cb_fn dtmf_rx_ul_cb,
+				       void *private_data);
 
 void voc_config_vocoder(uint32_t media_type,
 			uint32_t rate,
@@ -1244,18 +1325,31 @@ enum {
 	TX_PATH,
 };
 
+
+#define VOC_PATH_PASSIVE 0
+#define VOC_PATH_FULL 1
+#define VOC_PATH_VOLTE_PASSIVE 2
+#define VOC_PATH_VOICE2_PASSIVE 3
+
+#define MAX_SESSION_NAME_LEN 32
+#define VOICE_SESSION_NAME  "Voice session"
+#define VOIP_SESSION_NAME   "VoIP session"
+#define VOLTE_SESSION_NAME  "VoLTE session"
+#define VOICE2_SESSION_NAME "Voice2 session"
+
+#define VOICE2_SESSION_VSID "10DC1000"
+
 /* called  by alsa driver */
 int voc_set_pp_enable(uint16_t session_id, uint32_t module_id,
 		      uint32_t enable);
 int voc_get_pp_enable(uint16_t session_id, uint32_t module_id);
-int voc_set_widevoice_enable(uint16_t session_id, uint32_t wv_enable);
-uint32_t voc_get_widevoice_enable(uint16_t session_id);
 uint8_t voc_get_tty_mode(uint16_t session_id);
 int voc_set_tty_mode(uint16_t session_id, uint8_t tty_mode);
 int voc_start_voice_call(uint16_t session_id);
 int voc_end_voice_call(uint16_t session_id);
 int voc_standby_voice_call(uint16_t session_id);
 int voc_resume_voice_call(uint16_t session_id);
+int voc_set_lch(uint16_t session_id, enum voice_lch_mode lch_mode);
 int voc_set_rxtx_port(uint16_t session_id,
 		      uint32_t dev_port_id,
 		      uint32_t dev_type);
@@ -1267,10 +1361,9 @@ int voc_disable_cvp(uint16_t session_id);
 int voc_enable_cvp(uint16_t session_id);
 int voc_set_route_flag(uint16_t session_id, uint8_t path_dir, uint8_t set);
 uint8_t voc_get_route_flag(uint16_t session_id, uint8_t path_dir);
+int voc_enable_dtmf_rx_detection(uint16_t session_id, uint32_t enable);
+void voc_disable_dtmf_det_on_active_sessions(void);
 
-#define VOICE_SESSION_NAME "Voice session"
-#define VOIP_SESSION_NAME "VoIP session"
-#define VOLTE_SESSION_NAME "VoLTE session"
 uint16_t voc_get_session_id(char *name);
 
 int voc_start_playback(uint32_t set);

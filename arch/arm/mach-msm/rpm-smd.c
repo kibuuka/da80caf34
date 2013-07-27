@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -32,12 +32,13 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/rbtree.h>
 #include <mach/socinfo.h>
 #include <mach/msm_smd.h>
 #include <mach/rpm-smd.h>
-#include "rpm-notifier.h"
 #define CREATE_TRACE_POINTS
-#include "trace_rpm_smd.h"
+#include <mach/trace_rpm_smd.h>
+#include "rpm-notifier.h"
 /* Debug Definitions */
 
 enum {
@@ -62,6 +63,9 @@ struct msm_rpm_driver_data {
 };
 
 #define DEFAULT_BUFFER_SIZE 256
+#define DEBUG_PRINT_BUFFER_SIZE 512
+#define MAX_SLEEP_BUFFER 128
+
 #define GFP_FLAG(noirq) (noirq ? GFP_ATOMIC : GFP_KERNEL)
 #define INV_RSC "resource does not exist"
 #define ERR "err\0"
@@ -106,12 +110,312 @@ struct rpm_message_header {
 	uint32_t data_len;
 };
 
+struct kvp {
+	unsigned int k;
+	unsigned int s;
+};
+
 struct msm_rpm_kvp_data {
 	uint32_t key;
 	uint32_t nbytes; /* number of bytes */
 	uint8_t *value;
 	bool valid;
 };
+
+struct slp_buf {
+	struct rb_node node;
+	char ubuf[MAX_SLEEP_BUFFER];
+	char *buf;
+	bool valid;
+};
+static struct rb_root tr_root = RB_ROOT;
+
+static int msm_rpm_send_smd_buffer(char *buf, int size, bool noirq);
+static uint32_t msm_rpm_get_next_msg_id(void);
+
+static inline unsigned int get_rsc_type(char *buf)
+{
+	struct rpm_message_header *h;
+	h = (struct rpm_message_header *)
+		(buf + sizeof(struct rpm_request_header));
+	return h->resource_type;
+}
+
+static inline unsigned int get_rsc_id(char *buf)
+{
+	struct rpm_message_header *h;
+	h = (struct rpm_message_header *)
+		(buf + sizeof(struct rpm_request_header));
+	return h->resource_id;
+}
+
+#define get_data_len(buf) \
+	(((struct rpm_message_header *) \
+	  (buf + sizeof(struct rpm_request_header)))->data_len)
+
+#define get_req_len(buf) \
+	(((struct rpm_request_header *)(buf))->request_len)
+
+#define get_msg_id(buf) \
+	(((struct rpm_message_header *) \
+	  (buf + sizeof(struct rpm_request_header)))->msg_id)
+
+
+static inline int get_buf_len(char *buf)
+{
+	return get_req_len(buf) + sizeof(struct rpm_request_header);
+}
+
+static inline struct kvp *get_first_kvp(char *buf)
+{
+	return (struct kvp *)(buf + sizeof(struct rpm_request_header)
+			+ sizeof(struct rpm_message_header));
+}
+
+static inline struct kvp *get_next_kvp(struct kvp *k)
+{
+	return (struct kvp *)((void *)k + sizeof(*k) + k->s);
+}
+
+static inline void *get_data(struct kvp *k)
+{
+	return (void *)k + sizeof(*k);
+}
+
+
+static void delete_kvp(char *msg, struct kvp *d)
+{
+	struct kvp *n;
+	int dec, size;
+
+	n = get_next_kvp(d);
+	dec = (void *)n - (void *)d;
+	size = get_data_len(msg) - ((void *)n - (void *)get_first_kvp(msg));
+
+	memcpy((void *)d, (void *)n, size);
+
+	get_data_len(msg) -= dec;
+	get_req_len(msg) -= dec;
+}
+
+static inline void update_kvp_data(struct kvp *dest, struct kvp *src)
+{
+	memcpy(get_data(dest), get_data(src), src->s);
+}
+
+static void add_kvp(char *buf, struct kvp *n)
+{
+	int inc = sizeof(*n) + n->s;
+	BUG_ON((get_req_len(buf) + inc) > MAX_SLEEP_BUFFER);
+
+	memcpy(buf + get_buf_len(buf), n, inc);
+
+	get_data_len(buf) += inc;
+	get_req_len(buf) += inc;
+}
+
+static struct slp_buf *tr_search(struct rb_root *root, char *slp)
+{
+	unsigned int type = get_rsc_type(slp);
+	unsigned int id = get_rsc_id(slp);
+
+	struct rb_node *node = root->rb_node;
+
+	while (node) {
+		struct slp_buf *cur = rb_entry(node, struct slp_buf, node);
+		unsigned int ctype = get_rsc_type(cur->buf);
+		unsigned int cid = get_rsc_id(cur->buf);
+
+		if (type < ctype)
+			node = node->rb_left;
+		else if (type > ctype)
+			node = node->rb_right;
+		else if (id < cid)
+			node = node->rb_left;
+		else if (id > cid)
+			node = node->rb_right;
+		else
+			return cur;
+	}
+	return NULL;
+}
+
+static int tr_insert(struct rb_root *root, struct slp_buf *slp)
+{
+	unsigned int type = get_rsc_type(slp->buf);
+	unsigned int id = get_rsc_id(slp->buf);
+
+	struct rb_node **node = &(root->rb_node), *parent = NULL;
+
+	while (*node) {
+		struct slp_buf *curr = rb_entry(*node, struct slp_buf, node);
+		unsigned int ctype = get_rsc_type(curr->buf);
+		unsigned int cid = get_rsc_id(curr->buf);
+
+		parent = *node;
+
+		if (type < ctype)
+			node = &((*node)->rb_left);
+		else if (type > ctype)
+			node = &((*node)->rb_right);
+		else if (id < cid)
+			node = &((*node)->rb_left);
+		else if (id > cid)
+			node = &((*node)->rb_right);
+		else
+			return -EINVAL;
+	}
+
+	rb_link_node(&slp->node, parent, node);
+	rb_insert_color(&slp->node, root);
+	slp->valid = true;
+	return 0;
+}
+
+#define for_each_kvp(buf, k) \
+	for (k = (struct kvp *)get_first_kvp(buf); \
+		((void *)k - (void *)get_first_kvp(buf)) < get_data_len(buf);\
+		k = get_next_kvp(k))
+
+
+static void tr_update(struct slp_buf *s, char *buf)
+{
+	struct kvp *e, *n;
+
+	for_each_kvp(buf, n) {
+		for_each_kvp(s->buf, e) {
+			if (n->k == e->k) {
+				if (n->s == e->s) {
+					void *e_data = get_data(e);
+					void *n_data = get_data(n);
+					if (memcmp(e_data, n_data, n->s)) {
+						update_kvp_data(e, n);
+						s->valid = true;
+					}
+				} else {
+					delete_kvp(s->buf, e);
+					add_kvp(s->buf, n);
+					s->valid = true;
+				}
+				break;
+			}
+		}
+	}
+}
+
+int msm_rpm_smd_buffer_request(char *buf, int size, gfp_t flag)
+{
+	struct slp_buf *slp;
+	static DEFINE_SPINLOCK(slp_buffer_lock);
+	unsigned long flags;
+
+	if (size > MAX_SLEEP_BUFFER)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&slp_buffer_lock, flags);
+	slp = tr_search(&tr_root, buf);
+
+	if (!slp) {
+		slp = kzalloc(sizeof(struct slp_buf), GFP_ATOMIC);
+		if (!slp) {
+			spin_unlock_irqrestore(&slp_buffer_lock, flags);
+			return -ENOMEM;
+		}
+		slp->buf = PTR_ALIGN(&slp->ubuf[0], sizeof(u32));
+		memcpy(slp->buf, buf, size);
+		if (tr_insert(&tr_root, slp))
+			pr_err("%s(): Error updating sleep request\n",
+					__func__);
+	} else {
+		/* handle unsent requests */
+		tr_update(slp, buf);
+	}
+
+	spin_unlock_irqrestore(&slp_buffer_lock, flags);
+
+	return 0;
+}
+static void msm_rpm_print_sleep_buffer(struct slp_buf *s)
+{
+	char buf[DEBUG_PRINT_BUFFER_SIZE] = {0};
+	int pos;
+	int buflen = DEBUG_PRINT_BUFFER_SIZE;
+	char ch[5] = {0};
+	u32 type;
+	struct kvp *e;
+
+	if (!s)
+		return;
+
+	if (!s->valid)
+		return;
+
+	type = get_rsc_type(s->buf);
+	memcpy(ch, &type, sizeof(u32));
+
+	pos = scnprintf(buf, buflen,
+			"Sleep request type = 0x%08x(%s)",
+			get_rsc_type(s->buf), ch);
+	pos += scnprintf(buf + pos, buflen - pos, " id = 0%x",
+			get_rsc_id(s->buf));
+	for_each_kvp(s->buf, e) {
+		int i;
+		char *data = get_data(e);
+
+		memcpy(ch, &e->k, sizeof(u32));
+
+		pos += scnprintf(buf + pos, buflen - pos,
+				"\n\t\tkey = 0x%08x(%s)",
+				e->k, ch);
+		pos += scnprintf(buf + pos, buflen - pos,
+				" sz= %d data =", e->s);
+
+		for (i = 0; i < e->s; i++)
+			pos += scnprintf(buf + pos, buflen - pos,
+					" 0x%02X", data[i]);
+	}
+	pos += scnprintf(buf + pos, buflen - pos, "\n");
+	printk(buf);
+}
+
+static int msm_rpm_flush_requests(bool print)
+{
+	struct rb_node *t;
+	int ret;
+
+	for (t = rb_first(&tr_root); t; t = rb_next(t)) {
+
+		struct slp_buf *s = rb_entry(t, struct slp_buf, node);
+
+		if (!s->valid)
+			continue;
+
+		if (print)
+			msm_rpm_print_sleep_buffer(s);
+
+		get_msg_id(s->buf) = msm_rpm_get_next_msg_id();
+		ret = msm_rpm_send_smd_buffer(s->buf,
+				get_buf_len(s->buf), true);
+		/* By not adding the message to a wait list we can reduce
+		 * latency involved in waiting for a ACK from RPM. The ACK
+		 * messages will be processed when we wakeup from sleep but
+		 * processing should be minimal
+		 * msm_rpm_wait_for_ack_noirq(get_msg_id(s->buf));
+		 */
+
+		WARN_ON(ret != get_buf_len(s->buf));
+
+		trace_rpm_send_message(true, MSM_RPM_CTX_SLEEP_SET,
+				get_rsc_type(s->buf),
+				get_rsc_id(s->buf),
+				get_msg_id(s->buf));
+
+		s->valid = false;
+	}
+	return 0;
+
+}
+
 
 static atomic_t msm_rpm_msg_id = ATOMIC_INIT(0);
 
@@ -369,7 +673,7 @@ bool msm_rpm_waiting_for_ack(void)
 static struct msm_rpm_wait_data *msm_rpm_get_entry_from_msg_id(uint32_t msg_id)
 {
 	struct list_head *ptr;
-	struct msm_rpm_wait_data *elem;
+	struct msm_rpm_wait_data *elem = NULL;
 	unsigned long flags;
 
 	spin_lock_irqsave(&msm_rpm_list_lock, flags);
@@ -435,7 +739,7 @@ static void msm_rpm_free_list_entry(struct msm_rpm_wait_data *elem)
 static void msm_rpm_process_ack(uint32_t msg_id, int errno)
 {
 	struct list_head *ptr;
-	struct msm_rpm_wait_data *elem;
+	struct msm_rpm_wait_data *elem = NULL;
 	unsigned long flags;
 
 	spin_lock_irqsave(&msm_rpm_list_lock, flags);
@@ -450,7 +754,12 @@ static void msm_rpm_process_ack(uint32_t msg_id, int errno)
 		}
 		elem = NULL;
 	}
-	WARN_ON(!elem);
+	/* Special case where the sleep driver doesn't
+	 * wait for ACKs. This would decrease the latency involved with
+	 * entering RPM assisted power collapse.
+	 */
+	if (!elem)
+		trace_rpm_ack_recd(0, msg_id);
 
 	spin_unlock_irqrestore(&msm_rpm_list_lock, flags);
 }
@@ -543,8 +852,6 @@ static void msm_rpm_smd_work(struct work_struct *work)
 		spin_unlock(&msm_rpm_data.smd_lock_read);
 	}
 }
-
-#define DEBUG_PRINT_BUFFER_SIZE 512
 
 static void msm_rpm_log_request(struct msm_rpm_request *cdata)
 {
@@ -677,13 +984,42 @@ static void msm_rpm_log_request(struct msm_rpm_request *cdata)
 	pos += scnprintf(buf + pos, buflen - pos, "\n");
 	printk(buf);
 }
+static int msm_rpm_send_smd_buffer(char *buf, int size, bool noirq)
+{
+	unsigned long flags;
+	int ret;
 
+	spin_lock_irqsave(&msm_rpm_data.smd_lock_write, flags);
+	ret = smd_write_avail(msm_rpm_data.ch_info);
+
+	while ((ret = smd_write_avail(msm_rpm_data.ch_info)) < size) {
+		if (ret < 0)
+			break;
+		if (!noirq) {
+			spin_unlock_irqrestore(&msm_rpm_data.smd_lock_write,
+					flags);
+			cpu_relax();
+			spin_lock_irqsave(&msm_rpm_data.smd_lock_write, flags);
+		} else
+			udelay(5);
+	}
+
+	if (ret < 0) {
+		pr_err("%s(): SMD not initialized\n", __func__);
+		spin_unlock_irqrestore(&msm_rpm_data.smd_lock_write, flags);
+		return ret;
+	}
+
+	ret = smd_write(msm_rpm_data.ch_info, buf, size);
+	spin_unlock_irqrestore(&msm_rpm_data.smd_lock_write, flags);
+	return ret;
+
+}
 static int msm_rpm_send_data(struct msm_rpm_request *cdata,
 		int msg_type, bool noirq)
 {
 	uint8_t *tmpbuff;
 	int i, ret, msg_size;
-	unsigned long flags;
 
 	int req_hdr_sz, msg_hdr_sz;
 
@@ -694,8 +1030,6 @@ static int msm_rpm_send_data(struct msm_rpm_request *cdata,
 	msg_hdr_sz = sizeof(cdata->msg_hdr);
 
 	cdata->req_hdr.service_type = msm_rpm_request_service[msg_type];
-
-	cdata->msg_hdr.msg_id = msm_rpm_get_next_msg_id();
 
 	cdata->req_hdr.request_len = cdata->msg_hdr.data_len + msg_hdr_sz;
 	msg_size = cdata->req_hdr.request_len + req_hdr_sz;
@@ -713,8 +1047,6 @@ static int msm_rpm_send_data(struct msm_rpm_request *cdata,
 	}
 
 	tmpbuff = cdata->buf;
-
-	memcpy(tmpbuff, &cdata->req_hdr, req_hdr_sz + msg_hdr_sz);
 
 	tmpbuff += req_hdr_sz + msg_hdr_sz;
 
@@ -740,6 +1072,17 @@ static int msm_rpm_send_data(struct msm_rpm_request *cdata,
 
 	}
 
+	memcpy(cdata->buf, &cdata->req_hdr, req_hdr_sz + msg_hdr_sz);
+
+	if ((cdata->msg_hdr.set == MSM_RPM_CTX_SLEEP_SET) &&
+		!msm_rpm_smd_buffer_request(cdata->buf, msg_size,
+			GFP_FLAG(noirq)))
+		return 1;
+
+	cdata->msg_hdr.msg_id = msm_rpm_get_next_msg_id();
+
+	memcpy(cdata->buf + req_hdr_sz, &cdata->msg_hdr, msg_hdr_sz);
+
 	if (msm_rpm_debug_mask
 	    & (MSM_RPM_LOG_REQUEST_PRETTY | MSM_RPM_LOG_REQUEST_RAW))
 		msm_rpm_log_request(cdata);
@@ -755,29 +1098,7 @@ static int msm_rpm_send_data(struct msm_rpm_request *cdata,
 
 	msm_rpm_add_wait_list(cdata->msg_hdr.msg_id);
 
-	spin_lock_irqsave(&msm_rpm_data.smd_lock_write, flags);
-
-	ret = smd_write_avail(msm_rpm_data.ch_info);
-
-	if (ret < 0) {
-		pr_err("%s(): SMD not initialized\n", __func__);
-		spin_unlock_irqrestore(&msm_rpm_data.smd_lock_write, flags);
-		return 0;
-	}
-
-	while ((ret < msg_size)) {
-		if (!noirq) {
-			spin_unlock_irqrestore(&msm_rpm_data.smd_lock_write,
-					flags);
-			cpu_relax();
-			spin_lock_irqsave(&msm_rpm_data.smd_lock_write, flags);
-		} else
-			udelay(5);
-		ret = smd_write_avail(msm_rpm_data.ch_info);
-	}
-
-	ret = smd_write(msm_rpm_data.ch_info, &cdata->buf[0], msg_size);
-	spin_unlock_irqrestore(&msm_rpm_data.smd_lock_write, flags);
+	ret = msm_rpm_send_smd_buffer(&cdata->buf[0], msg_size, noirq);
 
 	if (ret == msg_size) {
 		trace_rpm_send_message(noirq, cdata->msg_hdr.set,
@@ -958,8 +1279,13 @@ EXPORT_SYMBOL(msm_rpm_send_message_noirq);
  * During power collapse, the rpm driver disables the SMD interrupts to make
  * sure that the interrupt doesn't wakes us from sleep.
  */
-int msm_rpm_enter_sleep(void)
+int msm_rpm_enter_sleep(bool print)
 {
+	if (standalone)
+		return 0;
+
+	msm_rpm_flush_requests(print);
+
 	return smd_mask_receive_interrupt(msm_rpm_data.ch_info, true);
 }
 EXPORT_SYMBOL(msm_rpm_enter_sleep);
@@ -970,19 +1296,12 @@ EXPORT_SYMBOL(msm_rpm_enter_sleep);
  */
 void msm_rpm_exit_sleep(void)
 {
+	if (standalone)
+		return;
+
 	smd_mask_receive_interrupt(msm_rpm_data.ch_info, false);
 }
 EXPORT_SYMBOL(msm_rpm_exit_sleep);
-
-static bool msm_rpm_set_standalone(void)
-{
-	if (machine_is_msm9625() || machine_is_msm8974_rumi()) {
-		pr_warn("%s(): Running in standalone mode, requests "
-				"will not be sent to RPM\n", __func__);
-		standalone = true;
-	}
-	return standalone;
-}
 
 static int __devinit msm_rpm_dev_probe(struct platform_device *pdev)
 {
@@ -1001,6 +1320,9 @@ static int __devinit msm_rpm_dev_probe(struct platform_device *pdev)
 	if (ret)
 		goto fail;
 
+	key = "rpm-standalone";
+	standalone = of_property_read_bool(pdev->dev.of_node, key);
+
 	init_completion(&msm_rpm_data.smd_open);
 	spin_lock_init(&msm_rpm_data.smd_lock_write);
 	spin_lock_init(&msm_rpm_data.smd_lock_read);
@@ -1012,9 +1334,14 @@ static int __devinit msm_rpm_dev_probe(struct platform_device *pdev)
 		pr_info("Cannot open RPM channel %s %d\n", msm_rpm_data.ch_name,
 				msm_rpm_data.ch_type);
 
-		msm_rpm_set_standalone();
 		BUG_ON(!standalone);
 		complete(&msm_rpm_data.smd_open);
+	} else {
+		/*
+		 * Override DT's suggestion to try standalone; since we have an
+		 * SMD channel.
+		 */
+		standalone = false;
 	}
 
 	wait_for_completion(&msm_rpm_data.smd_open);
@@ -1022,13 +1349,18 @@ static int __devinit msm_rpm_dev_probe(struct platform_device *pdev)
 	smd_disable_read_intr(msm_rpm_data.ch_info);
 
 	if (!standalone) {
-		msm_rpm_smd_wq = create_singlethread_workqueue("rpm-smd");
+		msm_rpm_smd_wq = alloc_workqueue("rpm-smd",
+				WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_HIGHPRI, 1);
 		if (!msm_rpm_smd_wq)
 			return -EINVAL;
 		queue_work(msm_rpm_smd_wq, &msm_rpm_data.work);
 	}
 
 	of_platform_populate(pdev->dev.of_node, NULL, NULL, &pdev->dev);
+
+	if (standalone)
+		pr_info("%s(): RPM running in standalone mode\n", __func__);
+
 	return 0;
 fail:
 	pr_err("%s(): Failed to read node: %s, key=%s\n", __func__,

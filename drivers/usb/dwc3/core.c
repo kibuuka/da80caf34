@@ -241,7 +241,13 @@ static int __devinit dwc3_alloc_event_buffers(struct dwc3 *dwc, unsigned length)
 	for (i = 0; i < num; i++) {
 		struct dwc3_event_buffer	*evt;
 
-		evt = dwc3_alloc_one_event_buffer(dwc, length);
+		/*
+		 * As SW workaround, allocate 8 bytes more than size of event
+		 * buffer given to USB Controller to avoid possible memory
+		 * corruption caused by event buffer overflow when Hw writes
+		 * Vendor Device test event which could be of 12 bytes.
+		 */
+		evt = dwc3_alloc_one_event_buffer(dwc, (length + 8));
 		if (IS_ERR(evt)) {
 			dev_err(dwc->dev, "can't allocate event buffer\n");
 			return PTR_ERR(evt);
@@ -276,7 +282,7 @@ static int dwc3_event_buffers_setup(struct dwc3 *dwc)
 		dwc3_writel(dwc->regs, DWC3_GEVNTADRHI(n),
 				upper_32_bits(evt->dma));
 		dwc3_writel(dwc->regs, DWC3_GEVNTSIZ(n),
-				evt->length & 0xffff);
+				(evt->length - 8) & 0xffff);
 		dwc3_writel(dwc->regs, DWC3_GEVNTCOUNT(n), 0);
 	}
 
@@ -461,6 +467,7 @@ void dwc3_post_host_reset_core_init(struct dwc3 *dwc)
 
 #define DWC3_ALIGN_MASK		(16 - 1)
 
+static u64 dwc3_dma_mask = DMA_BIT_MASK(64);
 static int __devinit dwc3_probe(struct platform_device *pdev)
 {
 	struct device_node	*node = pdev->dev.of_node;
@@ -474,6 +481,7 @@ static int __devinit dwc3_probe(struct platform_device *pdev)
 	void			*mem;
 
 	u8			mode;
+	bool			host_only_mode;
 
 	mem = devm_kzalloc(dev, sizeof(*dwc) + DWC3_ALIGN_MASK, GFP_KERNEL);
 	if (!mem) {
@@ -482,6 +490,11 @@ static int __devinit dwc3_probe(struct platform_device *pdev)
 	}
 	dwc = PTR_ALIGN(mem, DWC3_ALIGN_MASK + 1);
 	dwc->mem = mem;
+
+	if (!dev->dma_mask)
+		dev->dma_mask = &dwc3_dma_mask;
+	if (!dev->coherent_dma_mask)
+		dev->coherent_dma_mask = DMA_BIT_MASK(64);
 
 	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
 	if (!res) {
@@ -541,8 +554,8 @@ static int __devinit dwc3_probe(struct platform_device *pdev)
 	else
 		dwc->maximum_speed = DWC3_DCFG_SUPERSPEED;
 
-	if (of_get_property(node, "tx-fifo-resize", NULL))
-		dwc->needs_fifo_resize = true;
+	dwc->needs_fifo_resize = of_property_read_bool(node, "tx-fifo-resize");
+	host_only_mode = of_property_read_bool(node, "host-only-mode");
 
 	pm_runtime_no_callbacks(dev);
 	pm_runtime_set_active(dev);
@@ -555,6 +568,12 @@ static int __devinit dwc3_probe(struct platform_device *pdev)
 	}
 
 	mode = DWC3_MODE(dwc->hwparams.hwparams0);
+
+	/* Override mode if user selects host-only config with DRD core */
+	if (host_only_mode && (mode == DWC3_MODE_DRD)) {
+		dev_dbg(dev, "host only mode selected\n");
+		mode = DWC3_MODE_HOST;
+	}
 
 	switch (mode) {
 	case DWC3_MODE_DEVICE:
@@ -667,11 +686,22 @@ static int __devexit dwc3_remove(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_OF
+static const struct of_device_id of_dwc3_match[] = {
+	{
+		.compatible = "synopsys,dwc3"
+	},
+	{ },
+};
+MODULE_DEVICE_TABLE(of, of_dwc3_match);
+#endif
+
 static struct platform_driver dwc3_driver = {
 	.probe		= dwc3_probe,
 	.remove		= __devexit_p(dwc3_remove),
 	.driver		= {
 		.name	= "dwc3",
+		.of_match_table	= of_match_ptr(of_dwc3_match),
 	},
 };
 

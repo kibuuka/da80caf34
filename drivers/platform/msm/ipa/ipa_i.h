@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -30,13 +30,59 @@
 #define IPA_COOKIE 0xfacefeed
 
 #define IPA_NUM_PIPES 0x14
-#define IPA_SYS_DESC_FIFO_SZ (0x800)
+#define IPA_SYS_DESC_FIFO_SZ 0x800
+#define IPA_SYS_TX_DATA_DESC_FIFO_SZ 0x1000
 
 #ifdef IPA_DEBUG
 #define IPADBG(fmt, args...) \
-	pr_debug(DRV_NAME " %s:%d " fmt, __func__, __LINE__, ## args)
+	pr_err(DRV_NAME " %s:%d " fmt, __func__, __LINE__, ## args)
+/*	pr_debug(DRV_NAME " %s:%d " fmt, __func__, __LINE__, ## args) */
 #else
 #define IPADBG(fmt, args...)
+#endif
+
+#define WLAN_AMPDU_TX_EP 15
+#define WLAN_PROD_TX_EP  19
+
+#define MAX_NUM_EXCP     8
+#define MAX_NUM_IMM_CMD 17
+
+#define IPA_STATS
+
+#ifdef IPA_STATS
+#define IPA_STATS_INC_CNT(val) do {			\
+				++val;			\
+			} while (0)
+#define IPA_STATS_INC_CNT_SAFE(val) do {		\
+				atomic_inc(&val);	\
+			} while (0)
+#define IPA_STATS_EXCP_CNT(flags, base) do {			\
+			int i;					\
+			for (i = 0; i < MAX_NUM_EXCP; i++)	\
+				if (flags & BIT(i))		\
+					++base[i];		\
+			} while (0)
+#define IPA_STATS_INC_TX_CNT(ep, sw, hw) do {		\
+			if (ep == WLAN_AMPDU_TX_EP)	\
+				++hw;			\
+			else				\
+				++sw;			\
+			} while (0)
+#define IPA_STATS_INC_IC_CNT(num, base, stat_base) do {			\
+			int i;						\
+			for (i = 0; i < num; i++)			\
+				++stat_base[base[i].opcode];		\
+			} while (0)
+#define IPA_STATS_INC_BRIDGE_CNT(type, dir, base) do {		\
+			++base[type][dir];			\
+			} while (0)
+#else
+#define IPA_STATS_INC_CNT(x) do { } while (0)
+#define IPA_STATS_INC_CNT_SAFE(x) do { } while (0)
+#define IPA_STATS_EXCP_CNT(flags, base) do { } while (0)
+#define IPA_STATS_INC_TX_CNT(ep, sw, hw) do { } while (0)
+#define IPA_STATS_INC_IC_CNT(num, base, stat_base) do { } while (0)
+#define IPA_STATS_INC_BRIDGE_CNT(type, dir, base) do { } while (0)
 #endif
 
 #define IPAERR(fmt, args...) \
@@ -67,10 +113,12 @@
 
 #define IPA_EVENT_THRESHOLD 0x10
 
-#define IPA_RX_POOL_CEIL 24
+#define IPA_RX_POOL_CEIL 32
 #define IPA_RX_SKB_SIZE 2048
 
 #define IPA_DFLT_HDR_NAME "ipa_excp_hdr"
+#define IPA_INVALID_L4_PROTOCOL 0xFF
+
 
 #define IPA_CLIENT_IS_PROD(x) (x >= IPA_CLIENT_PROD && x < IPA_CLIENT_CONS)
 #define IPA_CLIENT_IS_CONS(x) (x >= IPA_CLIENT_CONS && x < IPA_CLIENT_MAX)
@@ -107,17 +155,6 @@ enum ipa_operating_mode {
 	IPA_MODE_MOBILE_AP_WLAN,
 	IPA_MODE_MOBILE_AP_ETH,
 	IPA_MODE_MAX
-};
-
-/**
- * enum ipa_bridge_dir - direction of the bridge from air interface perspective
- *
- * IPA bridge direction
- */
-enum ipa_bridge_dir {
-	IPA_DL,
-	IPA_UL,
-	IPA_DIR_MAX
 };
 
 /**
@@ -298,19 +335,22 @@ struct ipa_tree_node {
  * @connect: SPS connect
  * @priv: user provided information which will forwarded once the user is
  *        notified for new data avail
- * @client_notify: user provided CB for EP events notification
+ * @client_notify: user provided CB for EP events notification, the event is
+ *                 data revived.
  * @desc_fifo_in_pipe_mem: flag indicating if descriptors FIFO uses pipe memory
  * @data_fifo_in_pipe_mem: flag indicating if data FIFO uses pipe memory
  * @desc_fifo_pipe_mem_ofst: descriptors FIFO pipe memory offset
  * @data_fifo_pipe_mem_ofst: data FIFO pipe memory offset
  * @desc_fifo_client_allocated: if descriptors FIFO was allocated by a client
  * @data_fifo_client_allocated: if data FIFO was allocated by a client
+ * @suspended: valid for B2B pipes, whether IPA EP is suspended
  */
 struct ipa_ep_context {
 	int valid;
 	enum ipa_client_type client;
 	struct sps_pipe *ep_hdl;
 	struct ipa_ep_cfg cfg;
+	struct ipa_ep_cfg_holb holb;
 	u32 dst_pipe_index;
 	u32 rt_tbl_idx;
 	struct sps_connect connect;
@@ -323,6 +363,10 @@ struct ipa_ep_context {
 	u32 data_fifo_pipe_mem_ofst;
 	bool desc_fifo_client_allocated;
 	bool data_fifo_client_allocated;
+	bool suspended;
+	unsigned int pull_len;
+	struct ipa_ip_packet_init *cmd;
+	dma_addr_t dma_addr;
 };
 
 /**
@@ -332,17 +376,18 @@ struct ipa_ep_context {
  * @spinlock: protects the list and its size
  * @event: used to request CALLBACK mode from SPS driver
  * @ep: IPA EP context
- * @wait_desc_list: used to hold completed Tx packets
  *
  * IPA context specific to the system-bam pipes a.k.a LAN IN/OUT and WAN
  */
 struct ipa_sys_context {
 	struct list_head head_desc_list;
 	u32 len;
+	u32 max_len;
 	spinlock_t spinlock;
 	struct sps_register_event event;
 	struct ipa_ep_context *ep;
-	struct list_head wait_desc_list;
+	atomic_t curr_polling_state;
+	struct delayed_work switch_to_intr_work;
 };
 
 /**
@@ -358,8 +403,7 @@ enum ipa_desc_type {
 
 /**
  * struct ipa_tx_pkt_wrapper - IPA Tx packet wrapper
- * @type: specify if this packet is a data packet (skb) or
- * an immediate command
+ * @type: specify if this packet is for the skb or immediate command
  * @mem: memory buffer used by this Tx packet
  * @work: work struct for current Tx packet
  * @link: linked to the wrappers on that pipe
@@ -386,7 +430,7 @@ struct ipa_tx_pkt_wrapper {
 	void *user2;
 	struct ipa_sys_context *sys;
 	struct ipa_mem_buffer mult;
-	u16 cnt;
+	u32 cnt;
 	void *bounce;
 };
 
@@ -417,16 +461,14 @@ struct ipa_desc {
  * struct ipa_rx_pkt_wrapper - IPA Rx packet wrapper
  * @skb: skb
  * @dma_address: DMA address of this Rx packet
- * @work: work struct for current Rx packet
  * @link: linked to the Rx packets on that pipe
  * @len: how many bytes are copied into skb's flat buffer
  */
 struct ipa_rx_pkt_wrapper {
 	struct sk_buff *skb;
 	dma_addr_t dma_address;
-	struct work_struct work;
 	struct list_head link;
-	u16 len;
+	u32 len;
 };
 
 /**
@@ -442,6 +484,14 @@ struct ipa_rx_pkt_wrapper {
  * @is_sys_mem: flag indicating if NAT memory is sys memory
  * @is_dev_init: flag indicating if NAT device is initialized
  * @lock: NAT memory mutex
+ * @nat_base_address: nat table virutal address
+ * @ipv4_rules_addr: base nat table address
+ * @ipv4_expansion_rules_addr: expansion table address
+ * @index_table_addr: index table address
+ * @index_table_expansion_addr: index expansion table address
+ * @size_base_tables: base table size
+ * @size_expansion_tables: expansion table size
+ * @public_ip_addr: ip address of nat table
  */
 struct ipa_nat_mem {
 	struct class *class;
@@ -455,6 +505,62 @@ struct ipa_nat_mem {
 	bool is_sys_mem;
 	bool is_dev_init;
 	struct mutex lock;
+	void *nat_base_address;
+	char *ipv4_rules_addr;
+	char *ipv4_expansion_rules_addr;
+	char *index_table_addr;
+	char *index_table_expansion_addr;
+	u32 size_base_tables;
+	u32 size_expansion_tables;
+	u32 public_ip_addr;
+};
+
+/**
+ * enum ipa_hw_type - IPA hardware version type
+ * @IPA_HW_None: IPA hardware version not defined
+ * @IPA_HW_v1_0: IPA hardware version 1.0, corresponding to ELAN 1.0
+ * @IPA_HW_v1_1: IPA hardware version 1.1, corresponding to ELAN 2.0
+ * @IPA_HW_v2_0: IPA hardware version 2.0
+ */
+enum ipa_hw_type {
+	IPA_HW_None = 0,
+	IPA_HW_v1_0 = 1,
+	IPA_HW_v1_1 = 2,
+	IPA_HW_v2_0 = 3
+};
+
+/**
+ * enum ipa_hw_mode - IPA hardware mode
+ * @IPA_HW_Normal: Regular IPA hardware
+ * @IPA_HW_Virtual: IPA hardware supporting virtual memory allocation
+ * @IPA_HW_PCIE: IPA hardware supporting memory allocation over PCIE Bridge
+ */
+enum ipa_hw_mode {
+	IPA_HW_MODE_NORMAL  = 0,
+	IPA_HW_MODE_VIRTUAL = 1,
+	IPA_HW_MODE_PCIE    = 2
+};
+
+
+struct ipa_stats {
+	u32 imm_cmds[MAX_NUM_IMM_CMD];
+	u32 tx_sw_pkts;
+	u32 tx_hw_pkts;
+	u32 rx_pkts;
+	u32 rx_excp_pkts[MAX_NUM_EXCP];
+	u32 bridged_pkts[IPA_BRIDGE_TYPE_MAX][IPA_BRIDGE_DIR_MAX];
+	u32 rx_repl_repost;
+	u32 x_intr_repost;
+	u32 x_intr_repost_tx;
+	u32 rx_q_len;
+	u32 msg_w[IPA_EVENT_MAX];
+	u32 msg_r[IPA_EVENT_MAX];
+	u32 a2_power_on_reqs_in;
+	u32 a2_power_on_reqs_out;
+	u32 a2_power_off_reqs_in;
+	u32 a2_power_off_reqs_out;
+	u32 a2_power_modem_acks;
+	u32 a2_power_apps_acks;
 };
 
 /**
@@ -509,7 +615,9 @@ struct ipa_nat_mem {
  * @ip6_flt_tbl_lcl: where ip6 flt tables reside 1-local; 0-system
  * @empty_rt_tbl_mem: empty routing tables memory
  * @pipe_mem_pool: pipe memory pool
- * @one_kb_no_straddle_pool: one kb no straddle pool
+ * @dma_pool: special purpose DMA pool
+ * @ipa_hw_type: type of IPA HW type (e.g. IPA 1.0, IPA 1.1 etc')
+ * @ipa_hw_mode: mode of IPA HW mode (e.g. Normal, Virtual or over PCIe)
  *
  * IPA context - holds all relevant info about IPA driver and its state
  */
@@ -533,8 +641,6 @@ struct ipa_context {
 	struct kmem_cache *hdr_cache;
 	struct kmem_cache *hdr_offset_cache;
 	struct kmem_cache *rt_tbl_cache;
-	struct kmem_cache *tx_pkt_wrapper_cache;
-	struct kmem_cache *rx_pkt_wrapper_cache;
 	struct kmem_cache *tree_node_cache;
 	unsigned long rt_idx_bitmap[IPA_IP_MAX];
 	struct mutex lock;
@@ -546,6 +652,7 @@ struct ipa_context {
 	struct rb_root rt_rule_hdl_tree;
 	struct rb_root rt_tbl_hdl_tree;
 	struct rb_root flt_rule_hdl_tree;
+	struct rb_root tag_tree;
 	struct ipa_nat_mem nat_mem;
 	u32 excp_hdr_hdl;
 	u32 dflt_v4_rt_rule_hdl;
@@ -554,7 +661,6 @@ struct ipa_context {
 	uint aggregation_type;
 	uint aggregation_byte_limit;
 	uint aggregation_time_limit;
-	uint curr_polling_state;
 	struct delayed_work poll_work;
 	bool hdr_tbl_lcl;
 	struct ipa_mem_buffer hdr_mem;
@@ -564,12 +670,24 @@ struct ipa_context {
 	bool ip6_flt_tbl_lcl;
 	struct ipa_mem_buffer empty_rt_tbl_mem;
 	struct gen_pool *pipe_mem_pool;
-	struct dma_pool *one_kb_no_straddle_pool;
-	atomic_t ipa_active_clients;
+	struct dma_pool *dma_pool;
+	struct mutex ipa_active_clients_lock;
+	int ipa_active_clients;
 	u32 clnt_hdl_cmd;
 	u32 clnt_hdl_data_in;
 	u32 clnt_hdl_data_out;
 	u8 a5_pipe_index;
+	struct list_head intf_list;
+	struct list_head msg_list;
+	struct list_head pull_msg_list;
+	struct mutex msg_lock;
+	wait_queue_head_t msg_waitq;
+	enum ipa_hw_type ipa_hw_type;
+	enum ipa_hw_mode ipa_hw_mode;
+	/* featurize if memory footprint becomes a concern */
+	struct ipa_stats stats;
+	void *smem_pipe_mem;
+	struct sk_buff_head rx_list;
 };
 
 /**
@@ -630,16 +748,37 @@ struct a2_mux_pipe_connection {
 	int			desc_fifo_size;
 };
 
+struct ipa_plat_drv_res {
+	u32 ipa_mem_base;
+	u32 ipa_mem_size;
+	u32 bam_mem_base;
+	u32 bam_mem_size;
+	u32 a2_bam_mem_base;
+	u32 a2_bam_mem_size;
+	u32 ipa_irq;
+	u32 bam_irq;
+	u32 a2_bam_irq;
+	u32 ipa_pipe_mem_start_ofst;
+	u32 ipa_pipe_mem_size;
+	enum ipa_hw_type ipa_hw_type;
+	enum ipa_hw_mode ipa_hw_mode;
+	struct a2_mux_pipe_connection a2_to_ipa_pipe;
+	struct a2_mux_pipe_connection ipa_to_a2_pipe;
+};
+
 extern struct ipa_context *ipa_ctx;
 
 int ipa_get_a2_mux_pipe_info(enum a2_mux_pipe_direction pipe_dir,
 				struct a2_mux_pipe_connection *pipe_connect);
-void rmnet_bridge_get_client_handles(u32 *producer_handle,
+int ipa_get_a2_mux_bam_info(u32 *a2_bam_mem_base, u32 *a2_bam_mem_size,
+			    u32 *a2_bam_irq);
+void teth_bridge_get_client_handles(u32 *producer_handle,
 		u32 *consumer_handle);
-int ipa_send_one(struct ipa_sys_context *sys, struct ipa_desc *desc);
-int ipa_send(struct ipa_sys_context *sys, u16 num_desc, struct ipa_desc *desc);
+int ipa_send_one(struct ipa_sys_context *sys, struct ipa_desc *desc,
+		bool in_atomic);
 int ipa_get_ep_mapping(enum ipa_operating_mode mode,
 		       enum ipa_client_type client);
+int ipa_get_client_mapping(enum ipa_operating_mode mode, int pipe_idx);
 int ipa_generate_hw_rule(enum ipa_ip_type ip,
 			 const struct ipa_rule_attrib *attrib,
 			 u8 **buf,
@@ -659,30 +798,6 @@ int ipa_set_hw_timer_fix_for_mbim_aggr(bool);
 void ipa_debugfs_init(void);
 void ipa_debugfs_remove(void);
 
-/*
- * below functions read from/write to IPA local memory a.k.a. device memory.
- * the order of the arguments is deliberately different from the ipa_write*
- * functions which operate on system memory
- */
-void ipa_write_dev_8(u8 val, u16 ofst_ipa_sram);
-void ipa_write_dev_16(u16 val, u16 ofst_ipa_sram);
-void ipa_write_dev_32(u32 val, u16 ofst_ipa_sram);
-unsigned int ipa_read_dev_8(u16 ofst_ipa_sram);
-unsigned int ipa_read_dev_16(u16 ofst_ipa_sram);
-unsigned int ipa_read_dev_32(u16 ofst_ipa_sram);
-void ipa_write_dev_8rep(u16 ofst_ipa_sram, const void *buf,
-		unsigned long count);
-void ipa_write_dev_16rep(u16 ofst_ipa_sram, const void *buf,
-		unsigned long count);
-void ipa_write_dev_32rep(u16 ofst_ipa_sram, const void *buf,
-		unsigned long count);
-void ipa_read_dev_8rep(u16 ofst_ipa_sram, void *buf, unsigned long count);
-void ipa_read_dev_16rep(u16 ofst_ipa_sram, void *buf, unsigned long count);
-void ipa_read_dev_32rep(u16 ofst_ipa_sram, void *buf, unsigned long count);
-void ipa_memset_dev(u16 ofst_ipa_sram, u8 value, unsigned int count);
-void ipa_memcpy_from_dev(void *dest, u16 ofst_ipa_sram, unsigned int count);
-void ipa_memcpy_to_dev(u16 ofst_ipa_sram, void *source, unsigned int count);
-
 int ipa_insert(struct rb_root *root, struct ipa_tree_node *data);
 struct ipa_tree_node *ipa_search(struct rb_root *root, u32 hdl);
 void ipa_dump_buff_internal(void *base, dma_addr_t phy_base, u32 size);
@@ -700,8 +815,10 @@ void ipa_replenish_rx_cache(void);
 void ipa_cleanup_rx(void);
 int ipa_cfg_filter(u32 disable);
 void ipa_wq_write_done(struct work_struct *work);
-void ipa_wq_handle_rx(struct work_struct *work);
-void ipa_handle_rx_core(void);
+int ipa_handle_rx_core(struct ipa_sys_context *sys, bool process_all,
+		bool in_poll_state);
+int ipa_handle_tx_core(struct ipa_sys_context *sys, bool process_all,
+		bool in_poll_state);
 int ipa_pipe_mem_init(u32 start_ofst, u32 size);
 int ipa_pipe_mem_alloc(u32 *ofst, u32 size);
 int ipa_pipe_mem_free(u32 ofst, u32 size);
@@ -709,6 +826,11 @@ int ipa_straddle_boundary(u32 start, u32 end, u32 boundary);
 struct ipa_context *ipa_get_ctx(void);
 void ipa_enable_clks(void);
 void ipa_disable_clks(void);
+void ipa_inc_client_enable_clks(void);
+void ipa_dec_client_disable_clks(void);
+int __ipa_del_rt_rule(u32 rule_hdl);
+int __ipa_del_hdr(u32 hdr_hdl);
+int __ipa_release_hdr(u32 hdr_hdl);
 
 static inline u32 ipa_read_reg(void *base, u32 offset)
 {
@@ -727,7 +849,19 @@ static inline void ipa_write_reg(void *base, u32 offset, u32 val)
 
 int ipa_bridge_init(void);
 void ipa_bridge_cleanup(void);
-int ipa_bridge_setup(enum ipa_bridge_dir dir);
-int ipa_bridge_teardown(enum ipa_bridge_dir dir);
+
+ssize_t ipa_read(struct file *filp, char __user *buf, size_t count,
+		 loff_t *f_pos);
+int ipa_pull_msg(struct ipa_msg_meta *meta, char *buff, size_t count);
+int ipa_query_intf(struct ipa_ioc_query_intf *lookup);
+int ipa_query_intf_tx_props(struct ipa_ioc_query_intf_tx_props *tx);
+int ipa_query_intf_rx_props(struct ipa_ioc_query_intf_rx_props *rx);
+
+int a2_mux_init(void);
+int a2_mux_exit(void);
+
+void wwan_cleanup(void);
+
+int teth_bridge_driver_init(void);
 
 #endif /* _IPA_I_H_ */

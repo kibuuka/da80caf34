@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -45,7 +45,6 @@
 #ifdef CONFIG_MSM_DSPS
 #include <mach/msm_dsps.h>
 #endif
-#include <linux/android_pmem.h>
 #include <linux/gpio.h>
 #include <linux/delay.h>
 #include <mach/mdm.h>
@@ -412,6 +411,7 @@ static struct msm_serial_hslite_platform_data uart_gsbi9_pdata = {
 	.uart_tx_gpio	= 67,
 	.uart_rx_gpio	= 66,
 	.line		= 1,
+	.set_uart_clk_zero = true,
 };
 
 static struct resource msm_uart_gsbi9_resources[] = {
@@ -594,6 +594,29 @@ static struct resource gsbi12_qup_i2c_resources[] = {
 		.flags	= IORESOURCE_IRQ,
 	},
 };
+// Luke HDMI
+#if 1 //def CONFIG_HDMI_SIL9244
+static struct resource gsbi1_qup_i2c_resources[] = {
+	{
+		.name	= "qup_phys_addr",
+		.start	= MSM_GSBI1_QUP_PHYS,
+		.end	= MSM_GSBI1_QUP_PHYS + SZ_4K - 1,
+		.flags	= IORESOURCE_MEM,
+	},
+	{
+		.name	= "gsbi_qup_i2c_addr",
+		.start	= MSM_GSBI1_PHYS,
+		.end	= MSM_GSBI1_PHYS + 4 - 1,
+		.flags	= IORESOURCE_MEM,
+	},
+	{
+		.name	= "qup_err_intr",
+		.start	= GSBI1_QUP_IRQ,
+		.end	= GSBI1_QUP_IRQ,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+#endif
 
 #ifdef CONFIG_MSM_BUS_SCALING
 static struct msm_bus_vectors grp3d_init_vectors[] = {
@@ -976,6 +999,16 @@ struct platform_device msm_gsbi12_qup_i2c_device = {
 	.resource	= gsbi12_qup_i2c_resources,
 };
 
+// Luke HDMI
+#if 1 //def CONFIG_HDMI_SIL9244
+struct platform_device msm_gsbi1_qup_i2c_device = {
+	.name		= "qup_i2c",
+	.id		= MSM_GSBI1_QUP_I2C_BUS_ID,
+	.num_resources	= ARRAY_SIZE(gsbi1_qup_i2c_resources),
+	.resource	= gsbi1_qup_i2c_resources,
+};
+#endif
+
 #ifdef CONFIG_MSM_SSBI
 #define MSM_SSBI_PMIC1_PHYS	0x00500000
 static struct resource resources_ssbi_pmic1_resource[] = {
@@ -1029,7 +1062,8 @@ struct platform_device msm_device_ssbi3 = {
 	.resource	= msm_ssbi3_resources,
 };
 #endif /* CONFIG_I2C_SSBI */
-
+//Luke HDMI
+#if 0
 static struct resource gsbi1_qup_spi_resources[] = {
 	{
 		.name	= "spi_base",
@@ -1095,7 +1129,7 @@ struct platform_device msm_gsbi1_qup_spi_device = {
 	.resource	= gsbi1_qup_spi_resources,
 };
 
-
+#endif
 static struct resource gsbi10_qup_spi_resources[] = {
 	{
 		.name	= "spi_base",
@@ -3181,3 +3215,9 @@ struct platform_device msm8660_iommu_domain_device = {
 		.platform_data = &msm8660_iommu_domain_pdata,
 	}
 };
+
+struct platform_device msm8660_pm_8x60 = {
+	.name		= "pm-8x60",
+	.id		= -1,
+};
+

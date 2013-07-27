@@ -1,4 +1,4 @@
-/* Copyright (c) 2008-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2008-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -27,7 +27,6 @@ int diag_event_num_bytes;
 #define MAX_SSID_PER_RANGE	100
 
 #define FEATURE_MASK_LEN_BYTES		1
-#define APPS_RESPOND_LOG_ON_DEMAND	0x04
 
 struct mask_info {
 	int equip_id;
@@ -46,13 +45,6 @@ do {									\
 	msg_mask_tbl_ptr += 4;						\
 	/* increment by MAX_SSID_PER_RANGE cells */			\
 	msg_mask_tbl_ptr += MAX_SSID_PER_RANGE * sizeof(int);		\
-} while (0)
-
-#define WAIT_FOR_SMD(num_delays, delay_time)		\
-do {							\
-	int count;					\
-	for (count = 0; count < (num_delays); count++)	\
-		udelay((delay_time));			\
 } while (0)
 
 static void diag_print_mask_table(void)
@@ -312,7 +304,10 @@ void diag_mask_update_fn(struct work_struct *work)
 						smd_info->peripheral);
 	diag_send_log_mask_update(smd_info->ch, ALL_EQUIP_ID);
 	diag_send_event_mask_update(smd_info->ch, diag_event_num_bytes);
-	diag_send_feature_mask_update(smd_info->ch, smd_info->peripheral);
+	diag_send_feature_mask_update(smd_info);
+
+	if (smd_info->notify_context == SMD_EVENT_OPEN)
+		diag_send_diag_mode_update_by_smd(smd_info, MODE_REALTIME);
 
 	smd_info->notify_context = 0;
 }
@@ -349,7 +344,7 @@ void diag_send_log_mask_update(smd_channel_t *ch, int equip_id)
 							 header_size + size);
 					if (wr_size == -ENOMEM) {
 						retry_count++;
-						WAIT_FOR_SMD(5, 2000);
+						usleep_range(10000, 10100);
 					} else
 						break;
 				}
@@ -394,7 +389,7 @@ void diag_send_event_mask_update(smd_channel_t *ch, int num_bytes)
 			wr_size = smd_write(ch, buf, header_size + num_bytes);
 			if (wr_size == -ENOMEM) {
 				retry_count++;
-				WAIT_FOR_SMD(5, 2000);
+				usleep_range(10000, 10100);
 			} else
 				break;
 		}
@@ -444,7 +439,7 @@ void diag_send_msg_mask_update(smd_channel_t *ch, int updated_ssid_first,
 					 4*(driver->msg_mask->msg_mask_size));
 					if (size == -ENOMEM) {
 						retry_count++;
-						WAIT_FOR_SMD(5, 2000);
+						usleep_range(10000, 10100);
 					} else
 						break;
 				}
@@ -465,12 +460,25 @@ void diag_send_msg_mask_update(smd_channel_t *ch, int updated_ssid_first,
 	mutex_unlock(&driver->diag_cntl_mutex);
 }
 
-void diag_send_feature_mask_update(smd_channel_t *ch, int proc)
+void diag_send_feature_mask_update(struct diag_smd_info *smd_info)
 {
 	void *buf = driver->buf_feature_mask_update;
 	int header_size = sizeof(struct diag_ctrl_feature_mask);
-	int wr_size = -ENOMEM, retry_count = 0, timer;
+	int wr_size = -ENOMEM, retry_count = 0;
 	uint8_t feature_byte = 0;
+	int total_len = 0;
+
+	if (!smd_info) {
+		pr_err("diag: In %s, null smd info pointer\n",
+			__func__);
+		return;
+	}
+
+	if (!smd_info->ch) {
+		pr_err("diag: In %s, smd channel not open for peripheral: %d, type: %d\n",
+				__func__, smd_info->peripheral, smd_info->type);
+		return;
+	}
 
 	mutex_lock(&driver->diag_cntl_mutex);
 	/* send feature mask update */
@@ -478,27 +486,33 @@ void diag_send_feature_mask_update(smd_channel_t *ch, int proc)
 	driver->feature_mask->ctrl_pkt_data_len = 4 + FEATURE_MASK_LEN_BYTES;
 	driver->feature_mask->feature_mask_len = FEATURE_MASK_LEN_BYTES;
 	memcpy(buf, driver->feature_mask, header_size);
-	feature_byte |= APPS_RESPOND_LOG_ON_DEMAND;
+	feature_byte |= F_DIAG_INT_FEATURE_MASK;
+	feature_byte |= F_DIAG_LOG_ON_DEMAND_RSP_ON_MASTER;
+	feature_byte |= driver->supports_separate_cmdrsp ?
+				F_DIAG_REQ_RSP_CHANNEL : 0;
 	memcpy(buf+header_size, &feature_byte, FEATURE_MASK_LEN_BYTES);
+	total_len = header_size + FEATURE_MASK_LEN_BYTES;
 
-	if (ch) {
-		while (retry_count < 3) {
-			wr_size = smd_write(ch, buf, header_size +
-						FEATURE_MASK_LEN_BYTES);
-			if (wr_size == -ENOMEM) {
-				retry_count++;
-				for (timer = 0; timer < 5; timer++)
-					udelay(2000);
-			} else
-				break;
-		}
-		if (wr_size != header_size + FEATURE_MASK_LEN_BYTES)
-			pr_err("diag: proc %d fail feature update %d, tried %d",
-			   proc, wr_size, header_size + FEATURE_MASK_LEN_BYTES);
-	} else
-		pr_err("diag: ch invalid, feature update on proc %d\n", proc);
+	while (retry_count < 3) {
+		wr_size = smd_write(smd_info->ch, buf, total_len);
+		if (wr_size == -ENOMEM) {
+			retry_count++;
+			/*
+			 * The smd channel is full. Delay while
+			 * smd processes existing data and smd
+			 * has memory become available. The delay
+			 * of 10000 was determined empirically as
+			 * best value to use.
+			 */
+			usleep_range(10000, 10100);
+		} else
+			break;
+	}
+	if (wr_size != total_len)
+		pr_err("diag: In %s, peripheral %d fail feature update, size: %d, tried: %d",
+			__func__, smd_info->peripheral, wr_size, total_len);
+
 	mutex_unlock(&driver->diag_cntl_mutex);
-
 }
 
 int diag_process_apps_masks(unsigned char *buf, int len)
@@ -525,6 +539,10 @@ int diag_process_apps_masks(unsigned char *buf, int len)
 			*(int *)(driver->apps_rsp_buf + 4) = 0x3; /* op. ID */
 			*(int *)(driver->apps_rsp_buf + 8) = 0x0; /* success */
 			payload_length = 8 + ((*(int *)(buf + 4)) + 7)/8;
+			if (payload_length > APPS_BUF_SIZE - 12) {
+				pr_err("diag: log masks: buffer overflow\n");
+				return -EIO;
+			}
 			for (i = 0; i < payload_length; i++)
 				*(int *)(driver->apps_rsp_buf+12+i) = *(buf+i);
 
@@ -608,6 +626,10 @@ int diag_process_apps_masks(unsigned char *buf, int len)
 					rt_last_ssid) {
 					rt_mask_size = 4 * (rt_last_ssid -
 						rt_first_ssid + 1);
+					if (rt_mask_size > APPS_BUF_SIZE - 8) {
+						pr_err("diag: rt masks: buffer overflow\n");
+						return -EIO;
+					}
 					memcpy(driver->apps_rsp_buf+8,
 						rt_mask_ptr, rt_mask_size);
 					encode_rsp_and_send(8+rt_mask_size-1);
@@ -621,7 +643,17 @@ int diag_process_apps_masks(unsigned char *buf, int len)
 	else if ((*buf == 0x7d) && (*(buf+1) == 0x4)) {
 		ssid_first = *(uint16_t *)(buf + 2);
 		ssid_last = *(uint16_t *)(buf + 4);
+		if (ssid_last < ssid_first) {
+			pr_err("diag: Invalid msg mask ssid values, first: %d, last: %d\n",
+				ssid_first, ssid_last);
+			return -EIO;
+		}
 		ssid_range = 4 * (ssid_last - ssid_first + 1);
+		if (ssid_range > APPS_BUF_SIZE - 8) {
+			pr_err("diag: Not enough space for message mask, ssid_range: %d\n",
+				ssid_range);
+			return -EIO;
+		}
 		pr_debug("diag: received mask update for ssid_first = %d, ssid_last = %d",
 			ssid_first, ssid_last);
 		diag_update_msg_mask(ssid_first, ssid_last , buf + 8);
@@ -716,8 +748,8 @@ int diag_process_apps_masks(unsigned char *buf, int len)
 					(driver->log_on_demand_support)) {
 			driver->apps_rsp_buf[0] = 0x78;
 			/* Copy log code received */
-			*(uint16_t *)(driver->apps_rsp_buf+1) =
-							 *(uint16_t *)buf;
+			*(uint16_t *)(driver->apps_rsp_buf + 1) =
+							*(uint16_t *)(buf + 1);
 			driver->apps_rsp_buf[3] = 0x1;/* Unknown */
 			encode_rsp_and_send(3);
 		}

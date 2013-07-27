@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -206,6 +206,11 @@ int ocmem_rdm_transfer(int id, struct ocmem_map_list *clist,
 		return rc;
 	}
 
+	/* Clear DM Mask */
+	ocmem_write(DM_MASK_RESET, dm_base + DM_INTR_MASK);
+	/* Clear DM Interrupts */
+	ocmem_write(DM_INTR_RESET, dm_base + DM_INTR_CLR);
+
 	for (i = 0, j = slot; i < num_chunks; i++, j++) {
 
 		struct ocmem_chunk *chunk = &clist->chunks[i];
@@ -296,10 +301,6 @@ int ocmem_rdm_init(struct platform_device *pdev)
 
 	init_completion(&dm_clear_event);
 	init_completion(&dm_transfer_event);
-	/* Clear DM Mask */
-	ocmem_write(DM_MASK_RESET, dm_base + DM_INTR_MASK);
-	/* enable dm interrupts */
-	ocmem_write(DM_INTR_RESET, dm_base + DM_INTR_CLR);
 	ocmem_disable_core_clock();
 	return 0;
 }

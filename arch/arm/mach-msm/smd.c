@@ -1,7 +1,7 @@
 /* arch/arm/mach-msm/smd.c
  *
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2008-2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2008-2013, The Linux Foundation. All rights reserved.
  * Author: Brian Swetland <swetland@google.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -34,20 +34,26 @@
 #include <linux/kfifo.h>
 #include <linux/wakelock.h>
 #include <linux/notifier.h>
-#include <linux/sort.h>
 #include <linux/suspend.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
+
 #include <mach/msm_smd.h>
 #include <mach/msm_iomap.h>
 #include <mach/system.h>
 #include <mach/subsystem_notif.h>
 #include <mach/socinfo.h>
 #include <mach/proc_comm.h>
+#include <mach/msm_ipc_logging.h>
+#include <mach/ramdump.h>
+#include <mach/board.h>
+#include <mach/msm_smem.h>
+
 #include <asm/cacheflush.h>
 
 #include "smd_private.h"
 #include "modem_notifier.h"
+#include "smem_private.h"
 
 #if defined(CONFIG_ARCH_QSD8X50) || defined(CONFIG_ARCH_MSM8X60) \
 	|| defined(CONFIG_ARCH_MSM8960) || defined(CONFIG_ARCH_FSM9XXX) \
@@ -67,10 +73,11 @@
 #endif
 
 #define MODULE_NAME "msm_smd"
-#define SMEM_VERSION 0x000B
 #define SMD_VERSION 0x00020000
 #define SMSM_SNAPSHOT_CNT 64
 #define SMSM_SNAPSHOT_SIZE ((SMSM_NUM_ENTRIES + 1) * 4)
+#define RSPIN_INIT_WAIT_MS 1000
+#define SMD_FIFO_FULL_RESERVE 4
 
 uint32_t SMSM_NUM_ENTRIES = 8;
 uint32_t SMSM_NUM_HOSTS = 3;
@@ -169,14 +176,7 @@ static struct interrupt_config private_intr_config[NUM_SMD_SUBSYSTEMS] = {
 	},
 };
 
-struct smem_area {
-	void *phys_addr;
-	unsigned size;
-	void __iomem *virt_addr;
-};
-static uint32_t num_smem_areas;
-static struct smem_area *smem_areas;
-static void *smem_range_check(void *base, unsigned offset);
+static void *smd_dev;
 
 struct interrupt_stat interrupt_stats[NUM_SMD_SUBSYSTEMS];
 
@@ -190,33 +190,42 @@ enum {
 	SMSM_APPS_DEM_I = 3,
 };
 
-static int msm_smd_debug_mask;
+static int msm_smd_debug_mask = MSM_SMx_POWER_INFO;
 module_param_named(debug_mask, msm_smd_debug_mask,
 		   int, S_IRUGO | S_IWUSR | S_IWGRP);
+static void *smd_log_ctx;
+#define NUM_LOG_PAGES 4
+
+#define IPC_LOG(level, x...) do { \
+	if (smd_log_ctx) \
+		ipc_log_string(smd_log_ctx, x); \
+	else \
+		printk(level x); \
+	} while (0)
 
 #if defined(CONFIG_MSM_SMD_DEBUG)
 #define SMD_DBG(x...) do {				\
 		if (msm_smd_debug_mask & MSM_SMD_DEBUG) \
-			printk(KERN_DEBUG x);		\
+			IPC_LOG(KERN_DEBUG, x);		\
 	} while (0)
 
 #define SMSM_DBG(x...) do {					\
 		if (msm_smd_debug_mask & MSM_SMSM_DEBUG)	\
-			printk(KERN_DEBUG x);			\
+			IPC_LOG(KERN_DEBUG, x);		\
 	} while (0)
 
 #define SMD_INFO(x...) do {			 	\
 		if (msm_smd_debug_mask & MSM_SMD_INFO)	\
-			printk(KERN_INFO x);		\
+			IPC_LOG(KERN_INFO, x);		\
 	} while (0)
 
 #define SMSM_INFO(x...) do {				\
 		if (msm_smd_debug_mask & MSM_SMSM_INFO) \
-			printk(KERN_INFO x);		\
+			IPC_LOG(KERN_INFO, x);		\
 	} while (0)
 #define SMx_POWER_INFO(x...) do {				\
 		if (msm_smd_debug_mask & MSM_SMx_POWER_INFO) \
-			printk(KERN_INFO x);		\
+			IPC_LOG(KERN_INFO, x);		\
 	} while (0)
 #else
 #define SMD_DBG(x...) do { } while (0)
@@ -225,6 +234,17 @@ module_param_named(debug_mask, msm_smd_debug_mask,
 #define SMSM_INFO(x...) do { } while (0)
 #define SMx_POWER_INFO(x...) do { } while (0)
 #endif
+
+/**
+ * OVERFLOW_ADD_UNSIGNED() - check for unsigned overflow
+ *
+ * @type: type to check for overflow
+ * @a: left value to use
+ * @b: right value to use
+ * @returns: true if a + b will result in overflow; false otherwise
+ */
+#define OVERFLOW_ADD_UNSIGNED(type, a, b) \
+	(((type)~0 - (a)) < (b) ? true : false)
 
 static unsigned last_heap_free = 0xffffffff;
 
@@ -351,9 +371,6 @@ static inline void smd_write_intr(unsigned int val,
 
 #define SMD_LOOPBACK_CID 100
 
-#define SMEM_SPINLOCK_SMEM_ALLOC       "S:3"
-static remote_spinlock_t remote_spinlock;
-
 static LIST_HEAD(smd_ch_list_loopback);
 static void smd_fake_irq_handler(unsigned long arg);
 static void smsm_cb_snapshot(uint32_t use_wakelock);
@@ -363,7 +380,6 @@ static void notify_smsm_cb_clients_worker(struct work_struct *work);
 static DECLARE_WORK(smsm_cb_work, notify_smsm_cb_clients_worker);
 static DEFINE_MUTEX(smsm_lock);
 static struct smsm_state_info *smsm_states;
-static int spinlocks_initialized;
 
 /**
  * Variables to indicate smd module initialization.
@@ -373,6 +389,8 @@ static int smd_module_inited;
 static RAW_NOTIFIER_HEAD(smd_module_init_notifier_list);
 static DEFINE_MUTEX(smd_module_init_notifier_lock);
 static void smd_module_init_notify(uint32_t state, void *data);
+static int smd_stream_write_avail(struct smd_channel *ch);
+static int smd_stream_read_avail(struct smd_channel *ch);
 
 static inline void smd_write_intr(unsigned int val,
 				const void __iomem *addr)
@@ -381,10 +399,34 @@ static inline void smd_write_intr(unsigned int val,
 	__raw_writel(val, addr);
 }
 
-static inline void notify_modem_smd(void)
+static inline void log_notify(uint32_t subsystem, smd_channel_t *ch)
+{
+	const char *subsys = smd_edge_to_subsystem(subsystem);
+
+	(void) subsys;
+
+	if (!ch)
+		SMx_POWER_INFO("Apps->%s\n", subsys);
+	else
+		SMx_POWER_INFO(
+			"Apps->%s ch%d '%s': tx%d/rx%d %dr/%dw : %dr/%dw\n",
+			subsys, ch->n, ch->name,
+			ch->fifo_size -
+				(smd_stream_write_avail(ch) + 1),
+			smd_stream_read_avail(ch),
+			ch->half_ch->get_tail(ch->send),
+			ch->half_ch->get_head(ch->send),
+			ch->half_ch->get_tail(ch->recv),
+			ch->half_ch->get_head(ch->recv)
+			);
+}
+
+static inline void notify_modem_smd(smd_channel_t *ch)
 {
 	static const struct interrupt_config_item *intr
 	   = &private_intr_config[SMD_MODEM].smd;
+
+	log_notify(SMD_APPS_MODEM, ch);
 	if (intr->out_base) {
 		++interrupt_stats[SMD_MODEM].smd_out_config_count;
 		smd_write_intr(intr->out_bit_pos,
@@ -395,10 +437,12 @@ static inline void notify_modem_smd(void)
 	}
 }
 
-static inline void notify_dsp_smd(void)
+static inline void notify_dsp_smd(smd_channel_t *ch)
 {
 	static const struct interrupt_config_item *intr
 		= &private_intr_config[SMD_Q6].smd;
+
+	log_notify(SMD_APPS_QDSP, ch);
 	if (intr->out_base) {
 		++interrupt_stats[SMD_Q6].smd_out_config_count;
 		smd_write_intr(intr->out_bit_pos,
@@ -409,10 +453,12 @@ static inline void notify_dsp_smd(void)
 	}
 }
 
-static inline void notify_dsps_smd(void)
+static inline void notify_dsps_smd(smd_channel_t *ch)
 {
 	static const struct interrupt_config_item *intr
 		= &private_intr_config[SMD_DSPS].smd;
+
+	log_notify(SMD_APPS_DSPS, ch);
 	if (intr->out_base) {
 		++interrupt_stats[SMD_DSPS].smd_out_config_count;
 		smd_write_intr(intr->out_bit_pos,
@@ -423,11 +469,12 @@ static inline void notify_dsps_smd(void)
 	}
 }
 
-static inline void notify_wcnss_smd(void)
+static inline void notify_wcnss_smd(struct smd_channel *ch)
 {
 	static const struct interrupt_config_item *intr
 		= &private_intr_config[SMD_WCNSS].smd;
 
+	log_notify(SMD_APPS_WCNSS, ch);
 	if (intr->out_base) {
 		++interrupt_stats[SMD_WCNSS].smd_out_config_count;
 		smd_write_intr(intr->out_bit_pos,
@@ -438,12 +485,13 @@ static inline void notify_wcnss_smd(void)
 	}
 }
 
-static inline void notify_rpm_smd(void)
+static inline void notify_rpm_smd(smd_channel_t *ch)
 {
 	static const struct interrupt_config_item *intr
 		= &private_intr_config[SMD_RPM].smd;
 
 	if (intr->out_base) {
+		log_notify(SMD_APPS_RPM, ch);
 		++interrupt_stats[SMD_RPM].smd_out_config_count;
 		smd_write_intr(intr->out_bit_pos,
 		intr->out_base + intr->out_offset);
@@ -654,47 +702,6 @@ struct smd_shared_v2 {
 struct smd_shared_v2_word_access {
 	struct smd_half_channel_word_access ch0;
 	struct smd_half_channel_word_access ch1;
-};
-
-struct smd_channel {
-	volatile void __iomem *send; /* some variant of smd_half_channel */
-	volatile void __iomem *recv; /* some variant of smd_half_channel */
-	unsigned char *send_data;
-	unsigned char *recv_data;
-	unsigned fifo_size;
-	unsigned fifo_mask;
-	struct list_head ch_list;
-
-	unsigned current_packet;
-	unsigned n;
-	void *priv;
-	void (*notify)(void *priv, unsigned flags);
-
-	int (*read)(smd_channel_t *ch, void *data, int len, int user_buf);
-	int (*write)(smd_channel_t *ch, const void *data, int len,
-			int user_buf);
-	int (*read_avail)(smd_channel_t *ch);
-	int (*write_avail)(smd_channel_t *ch);
-	int (*read_from_cb)(smd_channel_t *ch, void *data, int len,
-			int user_buf);
-
-	void (*update_state)(smd_channel_t *ch);
-	unsigned last_state;
-	void (*notify_other_cpu)(void);
-
-	char name[20];
-	struct platform_device pdev;
-	unsigned type;
-
-	int pending_pkt_sz;
-
-	char is_pkt_ch;
-
-	/*
-	 * private internal functions to access *send and *recv.
-	 * never to be exported outside of smd
-	 */
-	struct smd_half_channel_access *half_ch;
 };
 
 struct edge_to_pid {
@@ -973,11 +980,7 @@ void smd_channel_reset(uint32_t restart_pid)
 	struct smd_alloc_elm *shared;
 	unsigned long flags;
 
-	SMD_DBG("%s: starting reset\n", __func__);
-
-	/* release any held spinlocks */
-	remote_spin_release(&remote_spinlock, restart_pid);
-	remote_spin_release_all(restart_pid);
+	SMx_POWER_INFO("%s: starting reset\n", __func__);
 
 	shared = smem_find(ID_CH_ALLOC_TBL, sizeof(*shared) * 64);
 	if (!shared) {
@@ -1014,11 +1017,11 @@ void smd_channel_reset(uint32_t restart_pid)
 	/* notify SMD processors */
 	mb();
 	smd_fake_irq_handler(0);
-	notify_modem_smd();
-	notify_dsp_smd();
-	notify_dsps_smd();
-	notify_wcnss_smd();
-	notify_rpm_smd();
+	notify_modem_smd(NULL);
+	notify_dsp_smd(NULL);
+	notify_dsps_smd(NULL);
+	notify_wcnss_smd(NULL);
+	notify_rpm_smd(NULL);
 
 	/* change all remote states to CLOSED */
 	mutex_lock(&smd_probe_lock);
@@ -1030,13 +1033,13 @@ void smd_channel_reset(uint32_t restart_pid)
 	/* notify SMD processors */
 	mb();
 	smd_fake_irq_handler(0);
-	notify_modem_smd();
-	notify_dsp_smd();
-	notify_dsps_smd();
-	notify_wcnss_smd();
-	notify_rpm_smd();
+	notify_modem_smd(NULL);
+	notify_dsp_smd(NULL);
+	notify_dsps_smd(NULL);
+	notify_wcnss_smd(NULL);
+	notify_rpm_smd(NULL);
 
-	SMD_DBG("%s: finished reset\n", __func__);
+	SMx_POWER_INFO("%s: finished reset\n", __func__);
 }
 
 /* how many bytes are available for reading */
@@ -1049,8 +1052,16 @@ static int smd_stream_read_avail(struct smd_channel *ch)
 /* how many bytes we are free to write */
 static int smd_stream_write_avail(struct smd_channel *ch)
 {
-	return ch->fifo_mask - ((ch->half_ch->get_head(ch->send) -
-			ch->half_ch->get_tail(ch->send)) & ch->fifo_mask);
+	int bytes_avail;
+
+	bytes_avail = ch->fifo_mask - ((ch->half_ch->get_head(ch->send) -
+			ch->half_ch->get_tail(ch->send)) & ch->fifo_mask) + 1;
+
+	if (bytes_avail < SMD_FIFO_FULL_RESERVE)
+		bytes_avail = 0;
+	else
+		bytes_avail -= SMD_FIFO_FULL_RESERVE;
+	return bytes_avail;
 }
 
 static int smd_packet_read_avail(struct smd_channel *ch)
@@ -1172,7 +1183,18 @@ static void update_packet_state(struct smd_channel *ch)
 	}
 }
 
-/* provide a pointer and length to next free space in the fifo */
+/**
+ * ch_write_buffer() - Provide a pointer and length for the next segment of
+ * free space in the FIFO.
+ * @ch: channel
+ * @ptr: Address to pointer for the next segment write
+ * @returns: Maximum size that can be written until the FIFO is either full
+ *           or the end of the FIFO has been reached.
+ *
+ * The returned pointer and length are passed to memcpy, so the next segment is
+ * defined as either the space available between the read index (tail) and the
+ * write index (head) or the space available to the end of the FIFO.
+ */
 static unsigned ch_write_buffer(struct smd_channel *ch, void **ptr)
 {
 	unsigned head = ch->half_ch->get_head(ch->send);
@@ -1180,10 +1202,11 @@ static unsigned ch_write_buffer(struct smd_channel *ch, void **ptr)
 	*ptr = (void *) (ch->send_data + head);
 
 	if (head < tail) {
-		return tail - head - 1;
+		return tail - head - SMD_FIFO_FULL_RESERVE;
 	} else {
-		if (tail == 0)
-			return ch->fifo_size - head - 1;
+		if (tail < SMD_FIFO_FULL_RESERVE)
+			return ch->fifo_size + tail - head
+					- SMD_FIFO_FULL_RESERVE;
 		else
 			return ch->fifo_size - head;
 	}
@@ -1214,7 +1237,7 @@ static void ch_set_state(struct smd_channel *ch, unsigned n)
 	}
 	ch->half_ch->set_state(ch->send, n);
 	ch->half_ch->set_fSTATE(ch->send, 1);
-	ch->notify_other_cpu();
+	ch->notify_other_cpu(ch);
 }
 
 static void do_smd_probe(void)
@@ -1290,7 +1313,8 @@ static void handle_smd_irq_closing_list(void)
 	spin_unlock_irqrestore(&smd_lock, flags);
 }
 
-static void handle_smd_irq(struct list_head *list, void (*notify)(void))
+static void handle_smd_irq(struct list_head *list,
+		void (*notify)(smd_channel_t *ch))
 {
 	unsigned long flags;
 	struct smd_channel *ch;
@@ -1325,10 +1349,18 @@ static void handle_smd_irq(struct list_head *list, void (*notify)(void))
 		}
 		if (ch_flags & 0x3) {
 			ch->update_state(ch);
-			SMx_POWER_INFO("SMD ch%d '%s' Data event r%d/w%d\n",
-					ch->n, ch->name,
-					ch->read_avail(ch),
-					ch->fifo_size - ch->write_avail(ch));
+			SMx_POWER_INFO(
+				"SMD ch%d '%s' Data event 0x%x tx%d/rx%d %dr/%dw : %dr/%dw\n",
+				ch->n, ch->name,
+				ch_flags,
+				ch->fifo_size -
+					(smd_stream_write_avail(ch) + 1),
+				smd_stream_read_avail(ch),
+				ch->half_ch->get_tail(ch->send),
+				ch->half_ch->get_head(ch->send),
+				ch->half_ch->get_tail(ch->recv),
+				ch->half_ch->get_head(ch->recv)
+				);
 			ch->notify(ch->priv, SMD_EVENT_DATA);
 		}
 		if (ch_flags & 0x4 && !state_change) {
@@ -1341,9 +1373,18 @@ static void handle_smd_irq(struct list_head *list, void (*notify)(void))
 	do_smd_probe();
 }
 
+static inline void log_irq(uint32_t subsystem)
+{
+	const char *subsys = smd_edge_to_subsystem(subsystem);
+
+	(void) subsys;
+
+	SMx_POWER_INFO("SMD Int %s->Apps\n", subsys);
+}
+
 static irqreturn_t smd_modem_irq_handler(int irq, void *data)
 {
-	SMx_POWER_INFO("SMD Int Modem->Apps\n");
+	log_irq(SMD_APPS_MODEM);
 	++interrupt_stats[SMD_MODEM].smd_in_count;
 	handle_smd_irq(&smd_ch_list_modem, notify_modem_smd);
 	handle_smd_irq_closing_list();
@@ -1352,7 +1393,7 @@ static irqreturn_t smd_modem_irq_handler(int irq, void *data)
 
 static irqreturn_t smd_dsp_irq_handler(int irq, void *data)
 {
-	SMx_POWER_INFO("SMD Int LPASS->Apps\n");
+	log_irq(SMD_APPS_QDSP);
 	++interrupt_stats[SMD_Q6].smd_in_count;
 	handle_smd_irq(&smd_ch_list_dsp, notify_dsp_smd);
 	handle_smd_irq_closing_list();
@@ -1361,7 +1402,7 @@ static irqreturn_t smd_dsp_irq_handler(int irq, void *data)
 
 static irqreturn_t smd_dsps_irq_handler(int irq, void *data)
 {
-	SMx_POWER_INFO("SMD Int DSPS->Apps\n");
+	log_irq(SMD_APPS_DSPS);
 	++interrupt_stats[SMD_DSPS].smd_in_count;
 	handle_smd_irq(&smd_ch_list_dsps, notify_dsps_smd);
 	handle_smd_irq_closing_list();
@@ -1370,7 +1411,7 @@ static irqreturn_t smd_dsps_irq_handler(int irq, void *data)
 
 static irqreturn_t smd_wcnss_irq_handler(int irq, void *data)
 {
-	SMx_POWER_INFO("SMD Int WCNSS->Apps\n");
+	log_irq(SMD_APPS_WCNSS);
 	++interrupt_stats[SMD_WCNSS].smd_in_count;
 	handle_smd_irq(&smd_ch_list_wcnss, notify_wcnss_smd);
 	handle_smd_irq_closing_list();
@@ -1379,7 +1420,7 @@ static irqreturn_t smd_wcnss_irq_handler(int irq, void *data)
 
 static irqreturn_t smd_rpm_irq_handler(int irq, void *data)
 {
-	SMx_POWER_INFO("SMD Int RPM->Apps\n");
+	log_irq(SMD_APPS_RPM);
 	++interrupt_stats[SMD_RPM].smd_in_count;
 	handle_smd_irq(&smd_ch_list_rpm, notify_rpm_smd);
 	handle_smd_irq_closing_list();
@@ -1514,7 +1555,7 @@ static int smd_stream_write(smd_channel_t *ch, const void *_data, int len,
 	}
 
 	if (orig_len - len)
-		ch->notify_other_cpu();
+		ch->notify_other_cpu(ch);
 
 	return orig_len - len;
 }
@@ -1566,7 +1607,7 @@ static int smd_stream_read(smd_channel_t *ch, void *data, int len, int user_buf)
 	r = ch_read(ch, data, len, user_buf);
 	if (r > 0)
 		if (!read_intr_blocked(ch))
-			ch->notify_other_cpu();
+			ch->notify_other_cpu(ch);
 
 	return r;
 }
@@ -1585,7 +1626,7 @@ static int smd_packet_read(smd_channel_t *ch, void *data, int len, int user_buf)
 	r = ch_read(ch, data, len, user_buf);
 	if (r > 0)
 		if (!read_intr_blocked(ch))
-			ch->notify_other_cpu();
+			ch->notify_other_cpu(ch);
 
 	spin_lock_irqsave(&smd_lock, flags);
 	ch->current_packet -= r;
@@ -1609,7 +1650,7 @@ static int smd_packet_read_from_cb(smd_channel_t *ch, void *data, int len,
 	r = ch_read(ch, data, len, user_buf);
 	if (r > 0)
 		if (!read_intr_blocked(ch))
-			ch->notify_other_cpu();
+			ch->notify_other_cpu(ch);
 
 	ch->current_packet -= r;
 	update_packet_state(ch);
@@ -1767,7 +1808,7 @@ static int smd_alloc_channel(struct smd_alloc_elm *alloc_elm)
 	return 0;
 }
 
-static inline void notify_loopback_smd(void)
+static inline void notify_loopback_smd(smd_channel_t *ch_notif)
 {
 	unsigned long flags;
 	struct smd_channel *ch;
@@ -2089,6 +2130,29 @@ int smd_write_end(smd_channel_t *ch)
 }
 EXPORT_SYMBOL(smd_write_end);
 
+int smd_write_segment_avail(smd_channel_t *ch)
+{
+	int n;
+
+	if (!ch) {
+		pr_err("%s: Invalid channel specified\n", __func__);
+		return -ENODEV;
+	}
+	if (!ch->is_pkt_ch) {
+		pr_err("%s: non-packet channel specified\n", __func__);
+		return -ENODEV;
+	}
+
+	n = smd_stream_write_avail(ch);
+
+	/* pkt hdr already written, no need to reserve space for it */
+	if (ch->pending_pkt_sz)
+		return n;
+
+	return n > SMD_HEADER_SIZE ? n - SMD_HEADER_SIZE : 0;
+}
+EXPORT_SYMBOL(smd_write_segment_avail);
+
 int smd_read(smd_channel_t *ch, void *data, int len)
 {
 	if (!ch) {
@@ -2290,7 +2354,7 @@ smd_tiocmset_from_cb(smd_channel_t *ch, unsigned int set, unsigned int clear)
 
 	ch->half_ch->set_fSTATE(ch->send, 1);
 	barrier();
-	ch->notify_other_cpu();
+	ch->notify_other_cpu(ch);
 
 	return 0;
 }
@@ -2331,151 +2395,6 @@ int smd_is_pkt_avail(smd_channel_t *ch)
 }
 EXPORT_SYMBOL(smd_is_pkt_avail);
 
-
-/* -------------------------------------------------------------------------- */
-
-/*
- * Shared Memory Range Check
- *
- * Takes a physical address and an offset and checks if the resulting physical
- * address would fit into one of the aux smem regions.  If so, returns the
- * corresponding virtual address.  Otherwise returns NULL.  Expects the array
- * of smem regions to be in ascending physical address order.
- *
- * @base: physical base address to check
- * @offset: offset from the base to get the final address
- */
-static void *smem_range_check(void *base, unsigned offset)
-{
-	int i;
-	void *phys_addr;
-	unsigned size;
-
-	for (i = 0; i < num_smem_areas; ++i) {
-		phys_addr = smem_areas[i].phys_addr;
-		size = smem_areas[i].size;
-		if (base < phys_addr)
-			return NULL;
-		if (base > phys_addr + size)
-			continue;
-		if (base >= phys_addr && base + offset < phys_addr + size)
-			return smem_areas[i].virt_addr + offset;
-	}
-
-	return NULL;
-}
-
-/* smem_alloc returns the pointer to smem item if it is already allocated.
- * Otherwise, it returns NULL.
- */
-void *smem_alloc(unsigned id, unsigned size)
-{
-	return smem_find(id, size);
-}
-EXPORT_SYMBOL(smem_alloc);
-
-/* smem_alloc2 returns the pointer to smem item.  If it is not allocated,
- * it allocates it and then returns the pointer to it.
- */
-void *smem_alloc2(unsigned id, unsigned size_in)
-{
-	struct smem_shared *shared = (void *) MSM_SHARED_RAM_BASE;
-	struct smem_heap_entry *toc = shared->heap_toc;
-	unsigned long flags;
-	void *ret = NULL;
-
-	if (!shared->heap_info.initialized) {
-		pr_err("%s: smem heap info not initialized\n", __func__);
-		return NULL;
-	}
-
-	if (id >= SMEM_NUM_ITEMS)
-		return NULL;
-
-	size_in = ALIGN(size_in, 8);
-	remote_spin_lock_irqsave(&remote_spinlock, flags);
-	if (toc[id].allocated) {
-		SMD_DBG("%s: %u already allocated\n", __func__, id);
-		if (size_in != toc[id].size)
-			pr_err("%s: wrong size %u (expected %u)\n",
-			       __func__, toc[id].size, size_in);
-		else
-			ret = (void *)(MSM_SHARED_RAM_BASE + toc[id].offset);
-	} else if (id > SMEM_FIXED_ITEM_LAST) {
-		SMD_DBG("%s: allocating %u\n", __func__, id);
-		if (shared->heap_info.heap_remaining >= size_in) {
-			toc[id].offset = shared->heap_info.free_offset;
-			toc[id].size = size_in;
-			wmb();
-			toc[id].allocated = 1;
-
-			shared->heap_info.free_offset += size_in;
-			shared->heap_info.heap_remaining -= size_in;
-			ret = (void *)(MSM_SHARED_RAM_BASE + toc[id].offset);
-		} else
-			pr_err("%s: not enough memory %u (required %u)\n",
-			       __func__, shared->heap_info.heap_remaining,
-			       size_in);
-	}
-	wmb();
-	remote_spin_unlock_irqrestore(&remote_spinlock, flags);
-	return ret;
-}
-EXPORT_SYMBOL(smem_alloc2);
-
-void *smem_get_entry(unsigned id, unsigned *size)
-{
-	struct smem_shared *shared = (void *) MSM_SHARED_RAM_BASE;
-	struct smem_heap_entry *toc = shared->heap_toc;
-	int use_spinlocks = spinlocks_initialized;
-	void *ret = 0;
-	unsigned long flags = 0;
-
-	if (id >= SMEM_NUM_ITEMS)
-		return ret;
-
-	if (use_spinlocks)
-		remote_spin_lock_irqsave(&remote_spinlock, flags);
-	/* toc is in device memory and cannot be speculatively accessed */
-	if (toc[id].allocated) {
-		*size = toc[id].size;
-		barrier();
-		if (!(toc[id].reserved & BASE_ADDR_MASK))
-			ret = (void *) (MSM_SHARED_RAM_BASE + toc[id].offset);
-		else
-			ret = smem_range_check(
-				(void *)(toc[id].reserved & BASE_ADDR_MASK),
-				toc[id].offset);
-	} else {
-		*size = 0;
-	}
-	if (use_spinlocks)
-		remote_spin_unlock_irqrestore(&remote_spinlock, flags);
-
-	return ret;
-}
-EXPORT_SYMBOL(smem_get_entry);
-
-void *smem_find(unsigned id, unsigned size_in)
-{
-	unsigned size;
-	void *ptr;
-
-	ptr = smem_get_entry(id, &size);
-	if (!ptr)
-		return 0;
-
-	size_in = ALIGN(size_in, 8);
-	if (size_in != size) {
-		pr_err("smem_find(%d, %d): wrong size %d\n",
-		       id, size_in, size);
-		return 0;
-	}
-
-	return ptr;
-}
-EXPORT_SYMBOL(smem_find);
-
 static int smsm_cb_init(void)
 {
 	struct smsm_state_info *state_info;
@@ -2515,6 +2434,18 @@ static int smsm_init(void)
 	struct smem_shared *shared = (void *) MSM_SHARED_RAM_BASE;
 	int i;
 	struct smsm_size_info_type *smsm_size_info;
+	unsigned long flags;
+	unsigned long j_start;
+
+	/* Verify that remote spinlock is not deadlocked */
+	j_start = jiffies;
+	while (!remote_spin_trylock_irqsave(&remote_spinlock, flags)) {
+		if (jiffies_to_msecs(jiffies - j_start) > RSPIN_INIT_WAIT_MS) {
+			panic("%s: Remote processor %d will not release spinlock\n",
+				__func__, remote_spin_owner(&remote_spinlock));
+		}
+	}
+	remote_spin_unlock_irqrestore(&remote_spinlock, flags);
 
 	smsm_size_info = smem_alloc(SMEM_SMSM_SIZE_INFO,
 				sizeof(struct smsm_size_info_type));
@@ -3375,14 +3306,6 @@ static int intr_init(struct interrupt_config_item *private_irq,
 	return ret;
 }
 
-int sort_cmp_func(const void *a, const void *b)
-{
-	struct smem_area *left = (struct smem_area *)(a);
-	struct smem_area *right = (struct smem_area *)(b);
-
-	return left->phys_addr - right->phys_addr;
-}
-
 int smd_core_platform_init(struct platform_device *pdev)
 {
 	int i;
@@ -3393,7 +3316,8 @@ int smd_core_platform_init(struct platform_device *pdev)
 	struct smd_subsystem_config *cfg;
 	int err_ret = 0;
 	struct smd_smem_regions *smd_smem_areas;
-	int smem_idx = 0;
+	struct smem_area *smem_areas_tmp = NULL;
+	int smem_idx;
 
 	smd_platform_data = pdev->dev.platform_data;
 	num_ss = smd_platform_data->num_ss_configs;
@@ -3404,37 +3328,54 @@ int smd_core_platform_init(struct platform_device *pdev)
 			   smd_ssr_config->disable_smsm_reset_handshake;
 
 	smd_smem_areas = smd_platform_data->smd_smem_areas;
-	if (smd_smem_areas) {
-		num_smem_areas = smd_platform_data->num_smem_areas;
-		smem_areas = kmalloc(sizeof(struct smem_area) * num_smem_areas,
-						GFP_KERNEL);
-		if (!smem_areas) {
-			pr_err("%s: smem_areas kmalloc failed\n", __func__);
+	num_smem_areas = smd_platform_data->num_smem_areas + 1;
+
+	/* Initialize main SMEM region */
+	smem_areas_tmp = kmalloc_array(num_smem_areas, sizeof(struct smem_area),
+				GFP_KERNEL);
+	if (!smem_areas_tmp) {
+		pr_err("%s: smem_areas kmalloc failed\n", __func__);
+		err_ret = -ENOMEM;
+		goto smem_areas_alloc_fail;
+	}
+
+	smem_areas_tmp[0].phys_addr =  msm_shared_ram_phys;
+	smem_areas_tmp[0].size = MSM_SHARED_RAM_SIZE;
+	smem_areas_tmp[0].virt_addr = MSM_SHARED_RAM_BASE;
+
+	/* Configure auxiliary SMEM regions */
+	for (smem_idx = 1; smem_idx < num_smem_areas; ++smem_idx) {
+		smem_areas_tmp[smem_idx].phys_addr =
+				smd_smem_areas[smem_idx].phys_addr;
+		smem_areas_tmp[smem_idx].size =
+				smd_smem_areas[smem_idx].size;
+		smem_areas_tmp[smem_idx].virt_addr = ioremap_nocache(
+			(unsigned long)(smem_areas_tmp[smem_idx].phys_addr),
+			smem_areas_tmp[smem_idx].size);
+		if (!smem_areas_tmp[smem_idx].virt_addr) {
+			pr_err("%s: ioremap_nocache() of addr: %pa size: %pa\n",
+				__func__,
+				&smem_areas_tmp[smem_idx].phys_addr,
+				&smem_areas_tmp[smem_idx].size);
 			err_ret = -ENOMEM;
-			goto smem_areas_alloc_fail;
+			goto smem_failed;
 		}
 
-		for (smem_idx = 0; smem_idx < num_smem_areas; ++smem_idx) {
-			smem_areas[smem_idx].phys_addr =
-					smd_smem_areas[smem_idx].phys_addr;
-			smem_areas[smem_idx].size =
-					smd_smem_areas[smem_idx].size;
-			smem_areas[smem_idx].virt_addr = ioremap_nocache(
-				(unsigned long)(smem_areas[smem_idx].phys_addr),
-				smem_areas[smem_idx].size);
-			if (!smem_areas[smem_idx].virt_addr) {
-				pr_err("%s: ioremap_nocache() of addr:%p"
-					" size: %x\n", __func__,
-					smem_areas[smem_idx].phys_addr,
-					smem_areas[smem_idx].size);
-				err_ret = -ENOMEM;
-				++smem_idx;
-				goto smem_failed;
-			}
+		if (OVERFLOW_ADD_UNSIGNED(uintptr_t,
+				(uintptr_t)smem_areas_tmp[smem_idx].virt_addr,
+				smem_areas_tmp[smem_idx].size)) {
+			pr_err("%s: invalid virtual address block %i: %p:%pa\n",
+					__func__, smem_idx,
+					smem_areas_tmp[smem_idx].virt_addr,
+					&smem_areas_tmp[smem_idx].size);
+			++smem_idx;
+			err_ret = -EINVAL;
+			goto smem_failed;
 		}
-		sort(smem_areas, num_smem_areas,
-				sizeof(struct smem_area),
-				sort_cmp_func, NULL);
+
+		SMD_DBG("%s: %d = %pa %pa", __func__, smem_idx,
+				&smd_smem_areas[smem_idx].phys_addr,
+				&smd_smem_areas[smem_idx].size);
 	}
 
 	for (i = 0; i < num_ss; i++) {
@@ -3478,8 +3419,9 @@ int smd_core_platform_init(struct platform_device *pdev)
 				cfg->subsys_name, SMD_MAX_CH_NAME_LEN);
 	}
 
-
 	SMD_INFO("smd_core_platform_init() done\n");
+
+	smem_areas = smem_areas_tmp;
 	return 0;
 
 intr_failed:
@@ -3497,9 +3439,12 @@ intr_failed:
 				);
 	}
 smem_failed:
-	for (smem_idx = smem_idx - 1; smem_idx >= 0; --smem_idx)
-		iounmap(smem_areas[smem_idx].virt_addr);
-	kfree(smem_areas);
+	for (smem_idx = smem_idx - 1; smem_idx >= 1; --smem_idx)
+		iounmap(smem_areas_tmp[smem_idx].virt_addr);
+
+	num_smem_areas = 0;
+	kfree(smem_areas_tmp);
+
 smem_areas_alloc_fail:
 	return err_ret;
 }
@@ -3669,15 +3614,19 @@ static int __devinit smd_core_devicetree_init(struct platform_device *pdev)
 	char *key;
 	struct resource *r;
 	void *irq_out_base;
-	void *aux_mem_base;
-	uint32_t aux_mem_size;
+	phys_addr_t aux_mem_base;
+	resource_size_t aux_mem_size;
 	int temp_string_size = 11; /* max 3 digit count */
 	char temp_string[temp_string_size];
-	int count;
 	struct device_node *node;
 	int ret;
 	const char *compatible;
+	struct ramdump_segment *ramdump_segments_tmp = NULL;
+	struct smem_area *smem_areas_tmp = NULL;
+	int smem_idx = 0;
 	int subnode_num = 0;
+	int i;
+	resource_size_t irq_out_size;
 
 	disable_smsm_reset_handshake = 1;
 
@@ -3687,74 +3636,124 @@ static int __devinit smd_core_devicetree_init(struct platform_device *pdev)
 		pr_err("%s: missing '%s'\n", __func__, key);
 		return -ENODEV;
 	}
-	irq_out_base = (void *)(r->start);
+	irq_out_size = resource_size(r);
+	irq_out_base = ioremap_nocache(r->start, irq_out_size);
+	if (!irq_out_base) {
+		pr_err("%s: ioremap_nocache() of irq_out_base addr:%pr size:%pr\n",
+				__func__, &r->start, &irq_out_size);
+		return -ENOMEM;
+	}
 	SMD_DBG("%s: %s = %p", __func__, key, irq_out_base);
 
-	count = 1;
+	num_smem_areas = 1;
 	while (1) {
-		scnprintf(temp_string, temp_string_size, "aux-mem%d", count);
+		scnprintf(temp_string, temp_string_size, "aux-mem%d",
+				num_smem_areas);
 		r = platform_get_resource_byname(pdev, IORESOURCE_MEM,
 								temp_string);
 		if (!r)
 			break;
 
 		++num_smem_areas;
-		++count;
-		if (count > 999) {
+		if (num_smem_areas > 999) {
 			pr_err("%s: max num aux mem regions reached\n",
 								__func__);
 			break;
 		}
 	}
 
-	if (num_smem_areas) {
-		smem_areas = kmalloc(sizeof(struct smem_area) * num_smem_areas,
-					GFP_KERNEL);
-		if (!smem_areas) {
-			pr_err("%s: smem areas kmalloc failed\n", __func__);
-			num_smem_areas = 0;
-			return -ENOMEM;
-		}
-		count = 1;
-		while (1) {
-			scnprintf(temp_string, temp_string_size, "aux-mem%d",
-									count);
-			r = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-								temp_string);
-			if (!r)
-				break;
-			aux_mem_base = (void *)(r->start);
-			aux_mem_size = (uint32_t)(resource_size(r));
-			SMD_DBG("%s: %s = %p %x", __func__, temp_string,
-					aux_mem_base, aux_mem_size);
-			smem_areas[count - 1].phys_addr = aux_mem_base;
-			smem_areas[count - 1].size = aux_mem_size;
-			smem_areas[count - 1].virt_addr = ioremap_nocache(
-				(unsigned long)(smem_areas[count-1].phys_addr),
-				smem_areas[count - 1].size);
-			if (!smem_areas[count - 1].virt_addr) {
-				pr_err("%s: ioremap_nocache() of addr:%p size: %x\n",
-					__func__,
-					smem_areas[count - 1].phys_addr,
-					smem_areas[count - 1].size);
-				ret = -ENOMEM;
-				goto free_smem_areas;
-			}
+	/* Initialize main SMEM region and SSR ramdump region */
+	key = "smem";
+	r = platform_get_resource_byname(pdev, IORESOURCE_MEM, key);
+	if (!r) {
+		pr_err("%s: missing '%s'\n", __func__, key);
+		return -ENODEV;
+	}
 
-			++count;
-			if (count > 999) {
-				pr_err("%s: max num aux mem regions reached\n",
-								__func__);
-				break;
-			}
+	smem_areas_tmp = kmalloc_array(num_smem_areas, sizeof(struct smem_area),
+				GFP_KERNEL);
+	if (!smem_areas_tmp) {
+		pr_err("%s: smem areas kmalloc failed\n", __func__);
+		ret = -ENOMEM;
+		goto free_smem_areas;
+	}
+
+	ramdump_segments_tmp = kmalloc_array(num_smem_areas,
+			sizeof(struct ramdump_segment), GFP_KERNEL);
+	if (!ramdump_segments_tmp) {
+		pr_err("%s: ramdump segment kmalloc failed\n", __func__);
+		ret = -ENOMEM;
+		goto free_smem_areas;
+	}
+
+	smem_areas_tmp[smem_idx].phys_addr =  r->start;
+	smem_areas_tmp[smem_idx].size = resource_size(r);
+	smem_areas_tmp[smem_idx].virt_addr = MSM_SHARED_RAM_BASE;
+
+	ramdump_segments_tmp[smem_idx].address = r->start;
+	ramdump_segments_tmp[smem_idx].size = resource_size(r);
+	++smem_idx;
+
+	/* Configure auxiliary SMEM regions */
+	while (1) {
+		scnprintf(temp_string, temp_string_size, "aux-mem%d",
+								smem_idx);
+		r = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+							temp_string);
+		if (!r)
+			break;
+		aux_mem_base = r->start;
+		aux_mem_size = resource_size(r);
+
+		ramdump_segments_tmp[smem_idx].address = aux_mem_base;
+		ramdump_segments_tmp[smem_idx].size = aux_mem_size;
+
+		smem_areas_tmp[smem_idx].phys_addr = aux_mem_base;
+		smem_areas_tmp[smem_idx].size = aux_mem_size;
+		smem_areas_tmp[smem_idx].virt_addr = ioremap_nocache(
+			(unsigned long)(smem_areas_tmp[smem_idx].phys_addr),
+			smem_areas_tmp[smem_idx].size);
+		SMD_DBG("%s: %s = %pa %pa -> %p", __func__, temp_string,
+				&aux_mem_base, &aux_mem_size,
+				smem_areas_tmp[smem_idx].virt_addr);
+
+		if (!smem_areas_tmp[smem_idx].virt_addr) {
+			pr_err("%s: ioremap_nocache() of addr:%pa size: %pa\n",
+				__func__,
+				&smem_areas_tmp[smem_idx].phys_addr,
+				&smem_areas_tmp[smem_idx].size);
+			ret = -ENOMEM;
+			goto free_smem_areas;
 		}
-		sort(smem_areas, num_smem_areas,
-				sizeof(struct smem_area),
-				sort_cmp_func, NULL);
+
+		if (OVERFLOW_ADD_UNSIGNED(uintptr_t,
+				(uintptr_t)smem_areas_tmp[smem_idx].virt_addr,
+				smem_areas_tmp[smem_idx].size)) {
+			pr_err("%s: invalid virtual address block %i: %p:%pa\n",
+					__func__, smem_idx,
+					smem_areas_tmp[smem_idx].virt_addr,
+					&smem_areas_tmp[smem_idx].size);
+			++smem_idx;
+			ret = -EINVAL;
+			goto free_smem_areas;
+		}
+
+		++smem_idx;
+		if (smem_idx > 999) {
+			pr_err("%s: max num aux mem regions reached\n",
+							__func__);
+			break;
+		}
 	}
 
 	for_each_child_of_node(pdev->dev.of_node, node) {
 		compatible = of_get_property(node, "compatible", NULL);
+		if (!compatible) {
+			pr_err("%s: invalid child node: compatible null\n",
+				__func__);
+			ret = -ENODEV;
+			goto rollback_subnodes;
+		}
 		if (!strcmp(compatible, "qcom,smd")) {
 			ret = parse_smd_devicetree(node, irq_out_base);
 			if (ret)
@@ -3772,14 +3771,16 @@ static int __devinit smd_core_devicetree_init(struct platform_device *pdev)
 		++subnode_num;
 	}
 
+	smem_areas = smem_areas_tmp;
+	smem_ramdump_segments = ramdump_segments_tmp;
 	return 0;
 
 rollback_subnodes:
-	count = 0;
+	i = 0;
 	for_each_child_of_node(pdev->dev.of_node, node) {
-		if (count >= subnode_num)
+		if (i >= subnode_num)
 			break;
-		++count;
+		++i;
 		compatible = of_get_property(node, "compatible", NULL);
 		if (!strcmp(compatible, "qcom,smd"))
 			unparse_smd_devicetree(node);
@@ -3787,15 +3788,21 @@ rollback_subnodes:
 			unparse_smsm_devicetree(node);
 	}
 free_smem_areas:
+	for (smem_idx = smem_idx - 1; smem_idx >= 1; --smem_idx)
+		iounmap(smem_areas_tmp[smem_idx].virt_addr);
+
 	num_smem_areas = 0;
-	kfree(smem_areas);
-	smem_areas = NULL;
+	kfree(ramdump_segments_tmp);
+	kfree(smem_areas_tmp);
 	return ret;
 }
 
 static int __devinit msm_smd_probe(struct platform_device *pdev)
 {
 	int ret;
+
+	if (!smem_initialized_check())
+		return -ENODEV;
 
 	SMD_INFO("smd probe\n");
 	INIT_WORK(&probe_work, smd_channel_probe_worker);
@@ -3819,6 +3826,7 @@ static int __devinit msm_smd_probe(struct platform_device *pdev)
 								__func__);
 				return ret;
 			}
+			smd_dev = &pdev->dev;
 		} else if (pdev->dev.platform_data) {
 			ret = smd_core_platform_init(pdev);
 			if (ret) {
@@ -3878,6 +3886,9 @@ static int restart_notifier_cb(struct notifier_block *this,
 				__func__, notifier->processor,
 				notifier->name);
 
+		remote_spin_release(&remote_spinlock, notifier->processor);
+		remote_spin_release_all(notifier->processor);
+
 		smd_channel_reset(notifier->processor);
 	}
 
@@ -3896,6 +3907,7 @@ static __init int modem_restart_late_init(void)
 		SMD_DBG("%s: registering notif for '%s', handle=%p\n",
 				__func__, nb->name, handle);
 	}
+
 	return 0;
 }
 late_initcall(modem_restart_late_init);
@@ -3922,13 +3934,18 @@ int __init msm_smd_init(void)
 	if (registered)
 		return 0;
 
+	smd_log_ctx = ipc_log_context_create(NUM_LOG_PAGES, "smd");
+	if (!smd_log_ctx) {
+		pr_err("%s: unable to create logging context\n", __func__);
+		msm_smd_debug_mask = 0;
+	}
+
 	registered = true;
-	rc = remote_spin_lock_init(&remote_spinlock, SMEM_SPINLOCK_SMEM_ALLOC);
+	rc = init_smem_remote_spinlock();
 	if (rc) {
 		pr_err("%s: remote spinlock init failed %d\n", __func__, rc);
 		return rc;
 	}
-	spinlocks_initialized = 1;
 
 	rc = platform_driver_register(&msm_smd_driver);
 	if (rc) {

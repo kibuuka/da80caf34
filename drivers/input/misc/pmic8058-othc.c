@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2011, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -30,6 +30,9 @@
 #include <linux/mfd/pm8xxx/core.h>
 #include <linux/pmic8058-othc.h>
 #include <linux/msm_adc.h>
+
+// Chihyu add, 20111222, Bug 1665, fix headset insert/remove and headset switch problem in suspend 
+#include <linux/wakelock.h>
 
 #define PM8058_OTHC_LOW_CURR_MASK	0xF0
 #define PM8058_OTHC_HIGH_CURR_MASK	0x0F
@@ -83,6 +86,9 @@ struct pm8058_othc {
 
 static struct pm8058_othc *config[OTHC_MICBIAS_MAX];
 
+// Chihyu add, 20111222, Bug 1665, fix headset insert/remove and headset switch problem in suspend 
+static struct wake_lock cci_headset_wake_lock;	
+
 static void hs_worker(struct work_struct *work)
 {
 	int rc;
@@ -122,6 +128,8 @@ static irqreturn_t ir_gpio_irq(int irq, void *dev_id)
 	/* disable irq, this gets enabled in the workqueue */
 	disable_irq_nosync(dd->othc_irq_ir);
 	schedule_delayed_work(&dd->hs_work, 0);
+// Chihyu add, 20111222, Bug 1665, fix headset insert/remove and headset switch problem in suspend 
+	wake_lock_timeout(&cci_headset_wake_lock, 5 * HZ);
 
 	return IRQ_HANDLED;
 }
@@ -568,6 +576,9 @@ static irqreturn_t pm8058_no_sw(int irq, void *dev_id)
 	}
 	spin_unlock_irqrestore(&dd->lock, flags);
 
+	// Chihyu add, 20111222, Bug 1665, fix headset insert/remove and headset switch problem in suspend 
+	wake_lock_timeout(&cci_headset_wake_lock, 5 * HZ);  // Chihyu_test
+
 	level = pm8xxx_read_irq_stat(dd->dev->parent, dd->othc_irq_sw);
 	if (level < 0) {
 		pr_err("Unable to read IRQ status register\n");
@@ -885,6 +896,9 @@ othc_configure_hsed(struct pm8058_othc *dd, struct platform_device *pd)
 	struct pmic8058_othc_config_pdata *pdata = pd->dev.platform_data;
 	struct othc_hsed_config *hsed_config = pdata->hsed_config;
 
+	// Chihyu add, 20111222, Bug 1665, fix headset insert/remove and headset switch problem in suspend 
+	wake_lock_init(&cci_headset_wake_lock, WAKE_LOCK_SUSPEND, "headset_wake_lock");
+
 	dd->othc_sdev.name = "h2w";
 	dd->othc_sdev.print_name = othc_headset_print_name;
 
@@ -1020,8 +1034,17 @@ othc_configure_hsed(struct pm8058_othc *dd, struct platform_device *pd)
 			goto fail_ir_status;
 		}
 		rc = !rc;
+//Nick add for DA80_3134 20110914
+		dd->othc_ir_state = rc;
+//Nick add end 20110914
 	}
 	if (rc) {
+// Chihyu add for headset switch wrong detection, enable l5A for headset, 20120109, MILBAIDUMR-144, MILBAIDUMR-152, Bug-1761
+		rc = regulator_enable(dd->othc_vreg);
+		printk("[%s][regulator_enable() = %d]\n",__func__,rc);
+		if (rc)
+			printk("othc micbais power on failed\n");
+// Chihyu add end 20120109
 		pr_debug("Accessory inserted during boot up\n");
 		/* process the data and report the inserted accessory */
 		rc = pm8058_accessory_report(dd, 1);

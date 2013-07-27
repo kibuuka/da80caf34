@@ -360,7 +360,7 @@ static __used bool wl_is_ibssstarter(struct wl_priv *wl);
  */
 static s32 __wl_cfg80211_up(struct wl_priv *wl);
 static s32 __wl_cfg80211_down(struct wl_priv *wl);
-static s32 wl_add_remove_eventmsg(struct net_device *ndev, u16 event, bool add);
+//static s32 wl_add_remove_eventmsg(struct net_device *ndev, u16 event, bool add);
 static bool wl_is_linkdown(struct wl_priv *wl, const wl_event_msg_t *e);
 static bool wl_is_linkup(struct wl_priv *wl, const wl_event_msg_t *e, struct net_device *ndev);
 static bool wl_is_nonetwork(struct wl_priv *wl, const wl_event_msg_t *e);
@@ -787,6 +787,8 @@ static void swap_key_to_BE(struct wl_wsec_key *key)
 	key->iv_initialized = dtoh32(key->iv_initialized);
 }
 
+
+#if 0
 /* For debug: Dump the contents of the encoded wps ie buffe */
 static void
 wl_validate_wps_ie(char *wps_ie, bool *pbc)
@@ -862,6 +864,7 @@ wl_validate_wps_ie(char *wps_ie, bool *pbc)
 		subel += subelt_len;
 	}
 }
+#endif
 
 static chanspec_t wl_cfg80211_get_shared_freq(struct wiphy *wiphy)
 {
@@ -3937,6 +3940,7 @@ wl_cfg80211_set_channel(struct wiphy *wiphy, struct net_device *dev,
 	return err;
 }
 
+#if 0
 static s32
 wl_validate_opensecurity(struct net_device *dev, s32 bssidx)
 {
@@ -3963,7 +3967,9 @@ wl_validate_opensecurity(struct net_device *dev, s32 bssidx)
 
 	return 0;
 }
+#endif
 
+#if 0
 static s32
 wl_validate_wpa2ie(struct net_device *dev, bcm_tlv_t *wpa2ie, s32 bssidx)
 {
@@ -4076,7 +4082,9 @@ wl_validate_wpa2ie(struct net_device *dev, bcm_tlv_t *wpa2ie, s32 bssidx)
 exit:
 	return 0;
 }
+#endif 
 
+#if 0
 static s32
 wl_validate_wpaie(struct net_device *dev, wpa_ie_fixed_t *wpaie, s32 bssidx)
 {
@@ -4222,7 +4230,7 @@ wl_validate_wpaie(struct net_device *dev, wpa_ie_fixed_t *wpaie, s32 bssidx)
 exit:
 	return 0;
 }
-
+#endif 
 #if 0
 static s32
 wl_cfg80211_add_set_beacon(struct wiphy *wiphy, struct net_device *dev,
@@ -6723,7 +6731,7 @@ static s32 wl_config_ifmode(struct wl_priv *wl, struct net_device *ndev, s32 ift
 
 	return 0;
 }
-
+#if 0
 static s32 wl_add_remove_eventmsg(struct net_device *ndev, u16 event, bool add)
 {
 	s8 iovbuf[WL_EVENTING_MASK_LEN + 12];
@@ -6757,6 +6765,7 @@ eventmsg_out:
 	return err;
 
 }
+#endif //(0)
 
 s32 wl_update_wiphybands(struct wl_priv *wl)
 {

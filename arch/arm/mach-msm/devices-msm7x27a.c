@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -2148,7 +2148,7 @@ void __init msm_common_io_init(void)
 {
 	msm_map_common_io();
 	if (socinfo_init() < 0)
-		pr_err("%s: socinfo_init() failed!\n", __func__);
+		pr_err("socinfo_init() failed!\n");
 	msm7x27x_cache_init();
 }
 
@@ -2164,7 +2164,7 @@ void __init msm8625_map_io(void)
 	msm_map_msm8625_io();
 
 	if (socinfo_init() < 0)
-		pr_err("%s: socinfo_init() failed!\n", __func__);
+		pr_err("socinfo_init() failed!\n");
 	msm7x27x_cache_init();
 }
 

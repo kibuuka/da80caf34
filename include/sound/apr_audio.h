@@ -1,6 +1,6 @@
 /*
  *
- * Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -1262,7 +1262,7 @@ struct asm_stream_cmd_open_read_v2_1 {
 #define MPEG4_MULTI_AAC 0x00010D86
 #define US_POINT_EPOS_FORMAT 0x00012310
 #define US_RAW_FORMAT        0x0001127C
-#define US_PROX_FORMAT       0x00012721
+#define US_PROX_FORMAT       0x0001272B
 #define MULTI_CHANNEL_PCM    0x00010C66
 
 #define ASM_ENCDEC_SBCRATE         0x00010C13
@@ -1453,6 +1453,23 @@ struct asm_stream_cmd_open_read_write {
 	u32                read_format;
 } __attribute__((packed));
 
+#define ASM_STREAM_CMD_OPEN_LOOPBACK	0x00010D6E
+struct asm_stream_cmd_open_loopback {
+	struct apr_hdr         hdr;
+	u32                    mode_flags;
+/* Mode flags.
+ * Bit 0-31: reserved; client should set these bits to 0
+ */
+	u16                    src_endpointype;
+	/* Endpoint type. 0 = Tx Matrix */
+	u16                    sink_endpointype;
+	/* Endpoint type. 0 = Rx Matrix */
+	u32                    postprocopo_id;
+/* Postprocessor topology ID. Specifies the topology of
+ * postprocessing algorithms.
+ */
+} __packed;
+
 #define ADM_CMD_CONNECT_AFE_PORT 0x00010320
 #define ADM_CMD_DISCONNECT_AFE_PORT 0x00010321
 
@@ -1511,6 +1528,17 @@ struct asm_stream_cmd_encdec_dualmono {
 	u32            param_id;
 	u32            param_size;
 	struct asm_dual_mono channel_map;
+} __packed;
+
+#define ASM_PARAM_ID_AAC_STEREO_MIX_COEFF_SELECTION_FLAG        0x00010DD8
+
+/* Structure for AAC decoder stereo coefficient setting. */
+
+struct asm_aac_stereo_mix_coeff_selection_param {
+	struct apr_hdr				hdr;
+	u32					param_id;
+	u32					param_size;
+	u32					aac_stereo_mix_coeff_flag;
 } __packed;
 
 #define ASM_ENCDEC_DEC_CHAN_MAP				 0x00010D82
@@ -1898,5 +1926,4 @@ struct srs_SS3D_params {
 
 int srs_ss3d_open(int port_id, int srs_tech_id, void *srs_params);
 /* SRS Studio Sound 3D end */
-
 #endif /*_APR_AUDIO_H_*/

@@ -2,7 +2,7 @@
  *  linux/drivers/mmc/host/msmsdcc.h - QCT MSM7K SDC Controller
  *
  *  Copyright (C) 2008 Google, All Rights Reserved.
- *  Copyright (c) 2009-2012, The Linux Foundation. All rights reserved.
+ *  Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -25,7 +25,6 @@
 #include <linux/scatterlist.h>
 #include <linux/dma-mapping.h>
 #include <linux/wakelock.h>
-#include <linux/earlysuspend.h>
 #include <linux/pm_qos.h>
 #include <mach/sps.h>
 
@@ -261,6 +260,12 @@
 #define MMC_MAX_DMA_CMDS (MAX_NR_SG_DMA_PIO * (MMC_MAX_REQ_SIZE / \
 		MMC_MAX_DMA_BOX_LENGTH))
 
+/*
+ * Peripheral bus clock scaling vote rates
+ */
+#define MSMSDCC_BUS_VOTE_MAX_RATE	64000000 /* Hz */
+#define MSMSDCC_BUS_VOTE_MIN_RATE	32000000 /* Hz */
+
 struct clk;
 
 struct msmsdcc_nc_dmadata {
@@ -361,6 +366,7 @@ struct msmsdcc_host {
 	struct clk		*clk;		/* main MMC bus clock */
 	struct clk		*pclk;		/* SDCC peripheral bus clock */
 	struct clk		*bus_clk;	/* SDCC bus voter clock */
+	unsigned long		bus_clk_rate;	/* peripheral bus clk rate */
 	atomic_t		clks_on;	/* set if clocks are enabled */
 
 	unsigned int		eject;		/* eject state */
@@ -369,7 +375,6 @@ struct msmsdcc_host {
 
 	unsigned int		clk_rate;	/* Current clock rate */
 	unsigned int		pclk_rate;
-	unsigned int		ddr_doubled_clk_rate;
 
 	u32			pwr;
 	struct mmc_platform_data *plat;
@@ -380,11 +385,6 @@ struct msmsdcc_host {
 	struct msmsdcc_dma_data	dma;
 	struct msmsdcc_sps_data sps;
 	struct msmsdcc_pio_data	pio;
-
-#ifdef CONFIG_HAS_EARLYSUSPEND
-	struct early_suspend early_suspend;
-	int polling_enabled;
-#endif
 
 	struct tasklet_struct 	dma_tlet;
 
@@ -500,17 +500,18 @@ static inline void set_default_hw_caps(struct msmsdcc_host *host)
 			| MSMSDCC_WAIT_FOR_TX_RX | MSMSDCC_IO_PAD_PWR_SWITCH
 			| MSMSDCC_AUTO_CMD19;
 
-	if ((step == 0x18) && (minor >= 3))
+	if ((step == 0x18) && (minor >= 3)) {
 		host->hw_caps |= MSMSDCC_AUTO_CMD21;
+		/* Version 0x06000018 need hard reset on errors */
+		host->hw_caps &= ~MSMSDCC_SOFT_RESET;
+	}
 
 	if (step >= 0x2b) /* SDCC v4 2.1.0 and greater */
 		host->hw_caps |= MSMSDCC_SW_RST | MSMSDCC_SW_RST_CFG |
 				 MSMSDCC_AUTO_CMD21 |
 				 MSMSDCC_DATA_PEND_FOR_CMD53 |
-				 MSMSDCC_TESTBUS_DEBUG;
-
-	if (step == 0x2b)
-		host->hw_caps |= MSMSDCC_SW_RST_CFG_BROKEN;
+				 MSMSDCC_TESTBUS_DEBUG |
+				 MSMSDCC_SW_RST_CFG_BROKEN;
 }
 
 int msmsdcc_set_pwrsave(struct mmc_host *mmc, int pwrsave);

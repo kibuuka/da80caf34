@@ -1,5 +1,4 @@
-/*
- * Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -39,6 +38,9 @@ static int voter_clk_set_rate(struct clk *clk, unsigned long rate)
 	struct clk *clkp;
 	struct clk_voter *clkh, *v = to_clk_voter(clk);
 	unsigned long cur_rate, new_rate, other_rate = 0;
+
+	if (v->is_branch)
+		return 0;
 
 	mutex_lock(&voter_clk_lock);
 
@@ -81,6 +83,11 @@ static int voter_clk_prepare(struct clk *clk)
 	mutex_lock(&voter_clk_lock);
 	parent = clk->parent;
 
+	if (v->is_branch) {
+		v->enabled = true;
+		goto out;
+	}
+
 	/*
 	 * Increase the rate if this clock is voting for a higher rate
 	 * than the current rate.
@@ -104,6 +111,7 @@ static void voter_clk_unprepare(struct clk *clk)
 	struct clk *parent;
 	struct clk_voter *v = to_clk_voter(clk);
 
+
 	mutex_lock(&voter_clk_lock);
 	parent = clk->parent;
 
@@ -112,12 +120,16 @@ static void voter_clk_unprepare(struct clk *clk)
 	 * the highest rate.
 	 */
 	v->enabled = false;
+	if (v->is_branch)
+		goto out;
+
 	new_rate = voter_clk_aggregate_rate(parent);
 	cur_rate = max(new_rate, clk->rate);
 
 	if (new_rate < cur_rate)
 		clk_set_rate(parent, new_rate);
 
+out:
 	mutex_unlock(&voter_clk_lock);
 }
 
@@ -139,11 +151,17 @@ static bool voter_clk_is_local(struct clk *clk)
 
 static enum handoff voter_clk_handoff(struct clk *clk)
 {
-	/* Apply default rate vote */
-	if (clk->rate)
-		return HANDOFF_ENABLED_CLK;
+	if (!clk->rate)
+		return HANDOFF_DISABLED_CLK;
 
-	return HANDOFF_DISABLED_CLK;
+	/*
+	 * Send the default rate to the parent if necessary and update the
+	 * software state of the voter clock.
+	 */
+	if (voter_clk_prepare(clk) < 0)
+		return HANDOFF_DISABLED_CLK;
+
+	return HANDOFF_ENABLED_CLK;
 }
 
 struct clk_ops clk_ops_voter = {

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -133,8 +133,23 @@ static void msm_mpm_set(bool wakeset)
 	uint32_t *irqs;
 	unsigned int reg;
 	int i;
+    uint32_t WakeUpIntEn0=0x0;	//Robert, 20111121, QCT8x60_CR1417: Fix WiFi Off suspend XO still on
+    uint32_t WakeUpIntEn1=0x0;	//Bruno, 20111121, [DA80][BugID 1422], Device can not be waken up from suspend in airplane mode
 
 	irqs = wakeset ? msm_mpm_wake_irq : msm_mpm_enabled_irq;
+
+	//B: Robert, 20111121, QCT8x60_CR1417 : Fix WiFi Off suspend XO still on
+	WakeUpIntEn0 = readl(IOMEM(0xFA004000) + 0x840); //TLMM_MPM_WAKEUP_INT_EN_0_SU
+	WakeUpIntEn0 |= 0x20000; //GPIO_89
+	writel(WakeUpIntEn0, IOMEM(0xFA004000) + 0x840); //TLMM_MPM_WAKEUP_INT_EN_0_SU
+	//E: Robert, 20111121, QCT8x60_CR1417
+
+	//B: Bruno, 20111121, [DA80][BugID 1422], Device can not be waken up from suspend in airplane mode
+	WakeUpIntEn1 = readl(IOMEM(0xFA004000) + 0x844); //TLMM_MPM_WAKEUP_INT_EN_1_SU
+	WakeUpIntEn1 |= 0x20000; //GPIO_123
+	writel(WakeUpIntEn1, IOMEM(0xFA004000) + 0x844); //TLMM_MPM_WAKEUP_INT_EN_1_SU
+	//E: Bruno, 20111121, [DA80][BugID 1422], Device can not be waken up from suspend in airplane mode
+
 	for (i = 0; i < MSM_MPM_REG_WIDTH; i++) {
 		reg = MSM_MPM_REQUEST_REG_ENABLE;
 		msm_mpm_write(reg, i, irqs[i]);

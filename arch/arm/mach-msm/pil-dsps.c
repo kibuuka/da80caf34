@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,10 +21,11 @@
 
 #include <mach/subsystem_restart.h>
 #include <mach/msm_smsm.h>
+#include <mach/ramdump.h>
+#include <mach/msm_smem.h>
 
 #include "peripheral-loader.h"
 #include "scm-pas.h"
-#include "ramdump.h"
 
 #define PPSS_RESET			0x2594
 #define PPSS_RESET_PROC_RESET		0x2
@@ -142,9 +143,6 @@ static void dsps_log_sfr(void)
 
 static void dsps_restart_handler(struct dsps_data *drv)
 {
-	pr_debug("%s: Restart lvl %d\n",
-		__func__, get_restart_level());
-
 	if (atomic_add_return(1, &drv->crash_in_progress) > 1) {
 		pr_err("%s: DSPS already resetting. Count %d\n", __func__,
 		       atomic_read(&drv->crash_in_progress));

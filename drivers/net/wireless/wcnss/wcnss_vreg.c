@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,11 +28,10 @@
 
 
 static void __iomem *msm_wcnss_base;
-static struct msm_xo_voter *wlan_clock;
-static const char *id = "WLAN";
 static LIST_HEAD(power_on_lock_list);
 static DEFINE_MUTEX(list_lock);
 static DEFINE_SEMAPHORE(wcnss_power_on_lock);
+static int auto_detect;
 
 #define MSM_RIVA_PHYS           0x03204000
 #define MSM_PRONTO_PHYS         0xfb21b000
@@ -40,10 +39,20 @@ static DEFINE_SEMAPHORE(wcnss_power_on_lock);
 #define RIVA_PMU_OFFSET         0x28
 #define PRONTO_PMU_OFFSET       0x1004
 
+#define RIVA_SPARE_OFFSET       0x0b4
+#define PRONTO_SPARE_OFFSET     0x1088
+#define NVBIN_DLND_BIT          BIT(25)
+
+#define PRONTO_IRIS_REG_READ_OFFSET       0x1134
+#define PRONTO_IRIS_REG_CHIP_ID           0x04
+
 #define WCNSS_PMU_CFG_IRIS_XO_CFG          BIT(3)
 #define WCNSS_PMU_CFG_IRIS_XO_EN           BIT(4)
 #define WCNSS_PMU_CFG_GC_BUS_MUX_SEL_TOP   BIT(5)
 #define WCNSS_PMU_CFG_IRIS_XO_CFG_STS      BIT(6) /* 1: in progress, 0: done */
+
+#define WCNSS_PMU_CFG_IRIS_XO_READ         BIT(9)
+#define WCNSS_PMU_CFG_IRIS_XO_READ_STS     BIT(10)
 
 #define WCNSS_PMU_CFG_IRIS_XO_MODE         0x6
 #define WCNSS_PMU_CFG_IRIS_XO_MODE_48      (3 << 1)
@@ -53,6 +62,8 @@ static DEFINE_SEMAPHORE(wcnss_power_on_lock);
 #define VREG_SET_VOLTAGE_MASK       0x0002
 #define VREG_OPTIMUM_MODE_MASK      0x0004
 #define VREG_ENABLE_MASK            0x0008
+
+#define WCNSS_INVALID_IRIS_REG      0xbaadbaad
 
 struct vregs_info {
 	const char * const name;
@@ -89,7 +100,7 @@ static struct vregs_info iris_vregs_pronto[] = {
 	{"qcom,iris-vddpa",  VREG_NULL_CONFIG, 2900000, 0,
 		3000000, 515000, NULL},
 	{"qcom,iris-vdddig", VREG_NULL_CONFIG, 1225000, 0,
-		1225000, 10000,  NULL},
+		1300000, 10000,  NULL},
 };
 
 /* WCNSS regulators for Pronto hardware */
@@ -108,20 +119,53 @@ struct host_driver {
 	struct list_head list;
 };
 
+enum {
+	WCNSS_XO_48MHZ = 1,
+	WCNSS_XO_19MHZ,
+	WCNSS_XO_INVALID,
+};
+
+enum {
+	IRIS_3660, /* also 3660A and 3680 */
+	IRIS_3620
+};
+
+
+int xo_auto_detect(u32 reg)
+{
+	reg >>= 30;
+
+	switch (reg) {
+	case IRIS_3660:
+		return WCNSS_XO_48MHZ;
+
+	case IRIS_3620:
+		return WCNSS_XO_19MHZ;
+
+	default:
+		return WCNSS_XO_INVALID;
+	}
+}
 
 static int configure_iris_xo(struct device *dev, bool use_48mhz_xo, int on)
 {
 	u32 reg = 0;
+	u32 iris_reg = WCNSS_INVALID_IRIS_REG;
 	int rc = 0;
 	int size = 0;
 	int pmu_offset = 0;
+	int spare_offset = 0;
 	unsigned long wcnss_phys_addr;
 	void __iomem *pmu_conf_reg;
+	void __iomem *spare_reg;
+	void __iomem *iris_read_reg;
 	struct clk *clk;
+	struct clk *clk_rf = NULL;
 
 	if (wcnss_hardware_type() == WCNSS_PRONTO_HW) {
 		wcnss_phys_addr = MSM_PRONTO_PHYS;
 		pmu_offset = PRONTO_PMU_OFFSET;
+		spare_offset = PRONTO_SPARE_OFFSET;
 		size = 0x3000;
 
 		clk = clk_get(dev, "xo");
@@ -129,9 +173,11 @@ static int configure_iris_xo(struct device *dev, bool use_48mhz_xo, int on)
 			pr_err("Couldn't get xo clock\n");
 			return PTR_ERR(clk);
 		}
+
 	} else {
 		wcnss_phys_addr = MSM_RIVA_PHYS;
 		pmu_offset = RIVA_PMU_OFFSET;
+		spare_offset = RIVA_SPARE_OFFSET;
 		size = SZ_256;
 
 		clk = clk_get(dev, "cxo");
@@ -147,7 +193,6 @@ static int configure_iris_xo(struct device *dev, bool use_48mhz_xo, int on)
 			pr_err("ioremap wcnss physical failed\n");
 			goto fail;
 		}
-		pmu_conf_reg = msm_wcnss_base + pmu_offset;
 
 		/* Enable IRIS XO */
 		rc = clk_prepare_enable(clk);
@@ -155,16 +200,61 @@ static int configure_iris_xo(struct device *dev, bool use_48mhz_xo, int on)
 			pr_err("clk enable failed\n");
 			goto fail;
 		}
+
+		/* NV bit is set to indicate that platform driver is capable
+		 * of doing NV download.
+		 */
+		pr_debug("wcnss: Indicate NV bin download\n");
+		spare_reg = msm_wcnss_base + spare_offset;
+		reg = readl_relaxed(spare_reg);
+		reg |= NVBIN_DLND_BIT;
+		writel_relaxed(reg, spare_reg);
+
+		pmu_conf_reg = msm_wcnss_base + pmu_offset;
 		writel_relaxed(0, pmu_conf_reg);
 		reg = readl_relaxed(pmu_conf_reg);
 		reg |= WCNSS_PMU_CFG_GC_BUS_MUX_SEL_TOP |
 				WCNSS_PMU_CFG_IRIS_XO_EN;
 		writel_relaxed(reg, pmu_conf_reg);
 
+		if (wcnss_xo_auto_detect_enabled()) {
+			iris_read_reg = msm_wcnss_base +
+				PRONTO_IRIS_REG_READ_OFFSET;
+			iris_reg = readl_relaxed(iris_read_reg);
+		}
+
+		if (iris_reg != WCNSS_INVALID_IRIS_REG) {
+			iris_reg &= 0xffff;
+			iris_reg |= PRONTO_IRIS_REG_CHIP_ID;
+			writel_relaxed(iris_reg, iris_read_reg);
+
+			/* Iris read */
+			reg = readl_relaxed(pmu_conf_reg);
+			reg |= WCNSS_PMU_CFG_IRIS_XO_READ;
+			writel_relaxed(reg, pmu_conf_reg);
+
+			/* Wait for PMU_CFG.iris_reg_read_sts */
+			while (readl_relaxed(pmu_conf_reg) &
+					WCNSS_PMU_CFG_IRIS_XO_READ_STS)
+				cpu_relax();
+
+			iris_reg = readl_relaxed(iris_read_reg);
+			auto_detect = xo_auto_detect(iris_reg);
+
+			/* Reset iris read bit */
+			reg &= ~WCNSS_PMU_CFG_IRIS_XO_READ;
+
+		} else if (wcnss_xo_auto_detect_enabled())
+			/* Default to 48 MHZ */
+			auto_detect = WCNSS_XO_48MHZ;
+		else
+			auto_detect = WCNSS_XO_INVALID;
+
 		/* Clear XO_MODE[b2:b1] bits. Clear implies 19.2 MHz TCXO */
 		reg &= ~(WCNSS_PMU_CFG_IRIS_XO_MODE);
 
-		if (use_48mhz_xo)
+		if ((use_48mhz_xo && auto_detect == WCNSS_XO_INVALID)
+				|| auto_detect ==  WCNSS_XO_48MHZ)
 			reg |= WCNSS_PMU_CFG_IRIS_XO_MODE_48;
 
 		writel_relaxed(reg, pmu_conf_reg);
@@ -184,42 +274,41 @@ static int configure_iris_xo(struct device *dev, bool use_48mhz_xo, int on)
 		writel_relaxed(reg, pmu_conf_reg);
 		clk_disable_unprepare(clk);
 
-		if (!use_48mhz_xo) {
-			wlan_clock = msm_xo_get(MSM_XO_TCXO_A2, id);
-			if (IS_ERR(wlan_clock)) {
-				rc = PTR_ERR(wlan_clock);
-				pr_err("Failed to get MSM_XO_TCXO_A2 voter (%d)\n",
-						rc);
+		if ((!use_48mhz_xo && auto_detect == WCNSS_XO_INVALID)
+				|| auto_detect ==  WCNSS_XO_19MHZ) {
+
+			clk_rf = clk_get(dev, "rf_clk");
+			if (IS_ERR(clk_rf)) {
+				pr_err("Couldn't get rf_clk\n");
 				goto fail;
 			}
 
-			rc = msm_xo_mode_vote(wlan_clock, MSM_XO_MODE_ON);
-			if (rc < 0) {
-				pr_err("Configuring MSM_XO_MODE_ON failed (%d)\n",
-						rc);
-				goto msm_xo_vote_fail;
+			rc = clk_prepare_enable(clk_rf);
+			if (rc) {
+				pr_err("clk_rf enable failed\n");
+				goto fail;
 			}
 		}
-	}  else {
-		if (wlan_clock != NULL && !use_48mhz_xo) {
-			rc = msm_xo_mode_vote(wlan_clock, MSM_XO_MODE_OFF);
-			if (rc < 0)
-				pr_err("Configuring MSM_XO_MODE_OFF failed (%d)\n",
-						rc);
+
+	}  else if ((!use_48mhz_xo && auto_detect == WCNSS_XO_INVALID)
+			|| auto_detect ==  WCNSS_XO_19MHZ) {
+		clk_rf = clk_get(dev, "rf_clk");
+		if (IS_ERR(clk_rf)) {
+			pr_err("Couldn't get rf_clk\n");
+			goto fail;
 		}
+		clk_disable_unprepare(clk_rf);
 	}
 
 	/* Add some delay for XO to settle */
 	msleep(20);
 
-	clk_put(clk);
-	return rc;
-
-msm_xo_vote_fail:
-	msm_xo_put(wlan_clock);
-
 fail:
 	clk_put(clk);
+
+	if (clk_rf != NULL)
+		clk_put(clk_rf);
+
 	return rc;
 }
 

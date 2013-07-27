@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2011,2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -109,6 +109,14 @@ struct msm_gpiomux_configs {
 	size_t                     ncfg;
 };
 
+/* Provide an enum and an API to write to misc TLMM registers */
+enum msm_tlmm_misc_reg {
+	TLMM_ETM_MODE_REG = 0x2014,
+	TLMM_SDC2_HDRV_PULL_CTL = 0x2048,
+};
+
+void msm_tlmm_misc_reg_write(enum msm_tlmm_misc_reg misc_reg, int val);
+
 #ifdef CONFIG_MSM_GPIOMUX
 
 /* Before using gpiomux, initialize the subsystem by telling it how many
@@ -126,6 +134,12 @@ int msm_gpiomux_init_dt(void);
  * identical to calling msm_gpiomux_write many times.
  */
 void msm_gpiomux_install(struct msm_gpiomux_config *configs, unsigned nconfigs);
+
+/* Install a block of gpiomux configurations in gpiomux. Do not however write
+ * to hardware. Just store the settings to be retrieved at a later time
+ */
+void msm_gpiomux_install_nowrite(struct msm_gpiomux_config *configs,
+				unsigned nconfigs);
 
 /* Increment a gpio's reference count, possibly activating the line. */
 int __must_check msm_gpiomux_get(unsigned gpio);

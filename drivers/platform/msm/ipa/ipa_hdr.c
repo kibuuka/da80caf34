@@ -12,7 +12,7 @@
 
 #include "ipa_i.h"
 
-static const u32 ipa_hdr_bin_sz[IPA_HDR_BIN_MAX] = { 8, 16, 32, 64 };
+static const u32 ipa_hdr_bin_sz[IPA_HDR_BIN_MAX] = { 8, 16, 24, 36 };
 
 /**
  * ipa_generate_hdr_hw_tbl() - generates the headers table
@@ -89,7 +89,7 @@ static int __ipa_commit_hdr(void)
 	if (ipa_ctx->hdr_tbl_lcl && mem->size > IPA_RAM_HDR_SIZE) {
 		IPAERR("tbl too big, needed %d avail %d\n", mem->size,
 				IPA_RAM_HDR_SIZE);
-		goto fail_hw_tbl_gen;
+		goto fail_send_cmd;
 	}
 
 	cmd->hdr_table_addr = mem->phys_base;
@@ -126,7 +126,7 @@ static int __ipa_commit_hdr(void)
 	return 0;
 
 fail_send_cmd:
-	if (mem->phys_base)
+	if (mem->base)
 		dma_free_coherent(NULL, mem->size, mem->base, mem->phys_base);
 fail_hw_tbl_gen:
 	kfree(cmd);
@@ -221,6 +221,8 @@ static int __ipa_add_hdr(struct ipa_hdr_add *hdr)
 		WARN_ON(1);
 	}
 
+	entry->ref_cnt++;
+
 	return 0;
 
 ofst_alloc_fail:
@@ -234,24 +236,30 @@ error:
 	return -EPERM;
 }
 
-static int __ipa_del_hdr(u32 hdr_hdl)
+int __ipa_del_hdr(u32 hdr_hdl)
 {
 	struct ipa_hdr_entry *entry = (struct ipa_hdr_entry *)hdr_hdl;
 	struct ipa_tree_node *node;
 	struct ipa_hdr_tbl *htbl = &ipa_ctx->hdr_tbl;
 
-	if (!entry || (entry->cookie != IPA_COOKIE) || (entry->ref_cnt != 0)) {
-		IPAERR("bad parm\n");
-		return -EINVAL;
-	}
 	node = ipa_search(&ipa_ctx->hdr_hdl_tree, hdr_hdl);
 	if (node == NULL) {
 		IPAERR("lookup failed\n");
-		return -EPERM;
+		return -EINVAL;
+	}
+
+	if (!entry || (entry->cookie != IPA_COOKIE)) {
+		IPAERR("bad parm\n");
+		return -EINVAL;
 	}
 
 	IPADBG("del hdr of sz=%d hdr_cnt=%d ofst=%d\n", entry->hdr_len,
 			htbl->hdr_cnt, entry->offset_entry->offset);
+
+	if (--entry->ref_cnt) {
+		IPADBG("hdr_hdl %x ref_cnt %d\n", hdr_hdl, entry->ref_cnt);
+		return 0;
+	}
 
 	/* move the offset entry to appropriate free list */
 	list_move(&entry->offset_entry->link,
@@ -501,8 +509,7 @@ static struct ipa_hdr_entry *__ipa_find_hdr(const char *name)
  * ipa_get_hdr() - Lookup the specified header resource
  * @lookup:	[inout] header to lookup and its handle
  *
- * lookup the specified header resource and return handle if it exists, if
- * lookup succeeds the header entry ref cnt is increased
+ * lookup the specified header resource and return handle if it exists
  *
  * Returns:	0 on success, negative on failure
  *
@@ -521,7 +528,6 @@ int ipa_get_hdr(struct ipa_ioc_get_hdr *lookup)
 	mutex_lock(&ipa_ctx->lock);
 	entry = __ipa_find_hdr(lookup->name);
 	if (entry) {
-		entry->ref_cnt++;
 		lookup->hdl = (uint32_t) entry;
 		result = 0;
 	}
@@ -530,6 +536,34 @@ int ipa_get_hdr(struct ipa_ioc_get_hdr *lookup)
 	return result;
 }
 EXPORT_SYMBOL(ipa_get_hdr);
+
+/**
+ * __ipa_release_hdr() - drop reference to header and cause
+ * deletion if reference count permits
+ * @hdr_hdl:	[in] handle of header to be released
+ *
+ * Returns:	0 on success, negative on failure
+ */
+int __ipa_release_hdr(u32 hdr_hdl)
+{
+	int result = 0;
+
+	if (__ipa_del_hdr(hdr_hdl)) {
+		IPADBG("fail to del hdr %x\n", hdr_hdl);
+		result = -EFAULT;
+		goto bail;
+	}
+
+	/* commit for put */
+	if (__ipa_commit_hdr()) {
+		IPAERR("fail to commit hdr\n");
+		result = -EFAULT;
+		goto bail;
+	}
+
+bail:
+	return result;
+}
 
 /**
  * ipa_put_hdr() - Release the specified header handle
@@ -545,31 +579,20 @@ int ipa_put_hdr(u32 hdr_hdl)
 	struct ipa_tree_node *node;
 	int result = -EFAULT;
 
-	if (entry == NULL || entry->cookie != IPA_COOKIE ||
-			entry->ref_cnt == 0) {
-		IPAERR("bad params\n");
-		return -EINVAL;
-	}
+	mutex_lock(&ipa_ctx->lock);
 	node = ipa_search(&ipa_ctx->hdr_hdl_tree, hdr_hdl);
 	if (node == NULL) {
 		IPAERR("lookup failed\n");
-		return -EPERM;
+		result = -EINVAL;
+		goto bail;
 	}
-	mutex_lock(&ipa_ctx->lock);
-	entry->ref_cnt--;
-	if (entry->ref_cnt == 0) {
-		if (__ipa_del_hdr(hdr_hdl)) {
-			IPAERR("fail to del hdr\n");
-			result = -EFAULT;
-			goto bail;
-		}
-		/* commit for put */
-		if (__ipa_commit_hdr()) {
-			IPAERR("fail to commit hdr\n");
-			result = -EFAULT;
-			goto bail;
-		}
+
+	if (entry == NULL || entry->cookie != IPA_COOKIE) {
+		IPAERR("bad params\n");
+		result = -EINVAL;
+		goto bail;
 	}
+
 	result = 0;
 bail:
 	mutex_unlock(&ipa_ctx->lock);

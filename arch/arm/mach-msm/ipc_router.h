@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -48,12 +48,25 @@
 #define IPC_ROUTER_XPRT_EVENT_CLOSE 3
 
 #define IPC_ROUTER_INFINITY -1
-#define DEFAULT_RCV_TIMEO IPC_ROUTER_INFINITY
+#define DEFAULT_RCV_TIMEO 0
 
 #define ALIGN_SIZE(x) ((4 - ((x) & 3)) & 3)
 
 #define ALL_SERVICE 0xFFFFFFFF
 #define ALL_INSTANCE 0xFFFFFFFF
+
+enum {
+	CLIENT_PORT,
+	SERVER_PORT,
+	CONTROL_PORT,
+	IRSC_PORT,
+};
+
+enum {
+	NULL_MODE,
+	SINGLE_LINK_MODE,
+	MULTI_LINK_MODE,
+};
 
 union rr_control_msg {
 	uint32_t cmd;

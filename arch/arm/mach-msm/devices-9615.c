@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -11,6 +11,7 @@
  *
  */
 
+#include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
 #include <linux/irq.h>
@@ -608,7 +609,10 @@ struct platform_device msm_dtmf = {
 	.name	= "msm-pcm-dtmf",
 	.id	= -1,
 };
-
+struct platform_device msm_host_pcm_voice = {
+	.name	= "msm-host-pcm-voice",
+	.id	= -1,
+};
 struct platform_device msm_compr_dsp = {
 	.name	= "msm-compr-dsp",
 	.id	= -1,
@@ -1266,6 +1270,7 @@ static uint16_t msm_mpm_bypassed_apps_irqs[] __initdata = {
 	LPASS_SCSS_GP_HIGH_IRQ,
 	SPS_MTI_31,
 	A2_BAM_IRQ,
+	USB1_HS_BAM_IRQ,
 };
 
 struct msm_mpm_device_data msm9615_mpm_dev_data __initdata = {

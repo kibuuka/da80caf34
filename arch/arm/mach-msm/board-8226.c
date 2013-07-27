@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,6 +10,7 @@
  * GNU General Public License for more details.
  */
 
+#include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/platform_device.h>
@@ -23,9 +24,8 @@
 #include <linux/of_fdt.h>
 #include <linux/of_irq.h>
 #include <linux/memory.h>
-#ifdef CONFIG_ANDROID_PMEM
-#include <linux/android_pmem.h>
-#endif
+#include <linux/regulator/qpnp-regulator.h>
+#include <linux/msm_tsens.h>
 #include <asm/mach/map.h>
 #include <asm/hardware/gic.h>
 #include <asm/mach/arch.h>
@@ -41,9 +41,16 @@
 #include <mach/socinfo.h>
 #include <mach/board.h>
 #include <mach/clk-provider.h>
+#include <mach/msm_smd.h>
+#include <mach/rpm-smd.h>
+#include <mach/rpm-regulator-smd.h>
+#include <linux/msm_thermal.h>
 #include "board-dt.h"
 #include "clock.h"
 #include "platsmp.h"
+#include "spm.h"
+#include "lpm_resources.h"
+#include "modem_notifier.h"
 
 static struct memtype_reserve msm8226_reserve_table[] __initdata = {
 	[MEMTYPE_SMI] = {
@@ -60,32 +67,15 @@ static int msm8226_paddr_to_memtype(unsigned int paddr)
 {
 	return MEMTYPE_EBI1;
 }
-static struct clk_lookup msm_clocks_dummy[] = {
-	CLK_DUMMY("core_clk",   BLSP1_UART_CLK, "f991f000.serial", OFF),
-	CLK_DUMMY("iface_clk",  BLSP1_UART_CLK, "f991f000.serial", OFF),
-	CLK_DUMMY("iface_clk",  HSUSB_IFACE_CLK, "f9a55000.usb", OFF),
-	CLK_DUMMY("core_clk",	HSUSB_CORE_CLK, "f9a55000.usb", OFF),
-	CLK_DUMMY("dfab_clk",	DFAB_CLK, "msm_sps", OFF),
-	CLK_DUMMY("dma_bam_pclk",	DMA_BAM_P_CLK, "msm_sps", OFF),
-	CLK_DUMMY("iface_clk",	NULL,		"msm_sdcc.1", OFF),
-	CLK_DUMMY("core_clk",	NULL,		"msm_sdcc.1", OFF),
-	CLK_DUMMY("bus_clk",	NULL,		"msm_sdcc.1", OFF),
-	CLK_DUMMY("iface_clk",	NULL,		"msm_sdcc.2", OFF),
-	CLK_DUMMY("core_clk",	NULL,		"msm_sdcc.2", OFF),
-	CLK_DUMMY("bus_clk",	NULL,		"msm_sdcc.2", OFF),
-	CLK_DUMMY("core_clk",	NULL,		"f9928000.spi", OFF),
-	CLK_DUMMY("iface_clk",	NULL,		"f9928000.spi", OFF),
-};
-
-static struct clock_init_data msm_dummy_clock_init_data __initdata = {
-	.table = msm_clocks_dummy,
-	.size = ARRAY_SIZE(msm_clocks_dummy),
-};
 
 static struct of_dev_auxdata msm8226_auxdata_lookup[] __initdata = {
 	OF_DEV_AUXDATA("qcom,msm-sdcc", 0xF9824000, \
 			"msm_sdcc.1", NULL),
 	OF_DEV_AUXDATA("qcom,msm-sdcc", 0xF98A4000, \
+			"msm_sdcc.2", NULL),
+	OF_DEV_AUXDATA("qcom,sdhci-msm", 0xF9824900, \
+			"msm_sdcc.1", NULL),
+	OF_DEV_AUXDATA("qcom,sdhci-msm", 0xF98A4900, \
 			"msm_sdcc.2", NULL),
 	{}
 };
@@ -98,36 +88,60 @@ static struct reserve_info msm8226_reserve_info __initdata = {
 static void __init msm8226_early_memory(void)
 {
 	reserve_info = &msm8226_reserve_info;
-	of_scan_flat_dt(dt_scan_for_memory_reserve, msm8226_reserve_table);
+	of_scan_flat_dt(dt_scan_for_memory_hole, msm8226_reserve_table);
 }
 
 static void __init msm8226_reserve(void)
 {
+	reserve_info = &msm8226_reserve_info;
+	of_scan_flat_dt(dt_scan_for_memory_reserve, msm8226_reserve_table);
 	msm_reserve();
+}
+
+/*
+ * Used to satisfy dependencies for devices that need to be
+ * run early or in a particular order. Most likely your device doesn't fall
+ * into this category, and thus the driver should not be added here. The
+ * EPROBE_DEFER can satisfy most dependency problems.
+ */
+void __init msm8226_add_drivers(void)
+{
+	msm_init_modem_notifier_list();
+	msm_smd_init();
+	msm_rpm_driver_init();
+	msm_lpmrs_module_init();
+	msm_spm_device_init();
+	rpm_regulator_smd_driver_init();
+	qpnp_regulator_init();
+	if (of_board_is_rumi())
+		msm_clock_init(&msm8226_rumi_clock_init_data);
+	else
+		msm_clock_init(&msm8226_clock_init_data);
+	tsens_tm_init_driver();
+	msm_thermal_device_init();
 }
 
 void __init msm8226_init(void)
 {
 	struct of_dev_auxdata *adata = msm8226_auxdata_lookup;
 
-	msm8226_init_gpiomux();
-
-	msm_clock_init(&msm_dummy_clock_init_data);
-
 	if (socinfo_init() < 0)
 		pr_err("%s: socinfo_init() failed\n", __func__);
 
-	of_platform_populate(NULL, of_default_bus_match_table, adata, NULL);
+	msm8226_init_gpiomux();
+	board_dt_populate(adata);
+	msm8226_add_drivers();
 }
 
 static const char *msm8226_dt_match[] __initconst = {
 	"qcom,msm8226",
+	"qcom,msm8926",
 	NULL
 };
 
 DT_MACHINE_START(MSM8226_DT, "Qualcomm MSM 8226 (Flattened Device Tree)")
 	.map_io = msm_map_msm8226_io,
-	.init_irq = msm_dt_init_irq_nompm,
+	.init_irq = msm_dt_init_irq,
 	.init_machine = msm8226_init,
 	.handle_irq = gic_handle_irq,
 	.timer = &msm_dt_timer,

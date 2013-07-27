@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -22,16 +22,19 @@ struct platform_device;
 
 struct q6v5_data {
 	void __iomem *reg_base;
-	struct clk *xo;		/* XO clock source */
-	struct clk *ahb_clk;	/* PIL access to registers */
-	struct clk *axi_clk;	/* CPU access to memory */
-	struct clk *core_clk;	/* CPU core */
-	struct clk *reg_clk;	/* CPU access registers */
-	struct clk *rom_clk;	/* Boot ROM */
+	void __iomem *cxrail_bhs;  /* External BHS register */
+	struct clk *xo;		   /* XO clock source */
+	struct clk *ahb_clk;	   /* PIL access to registers */
+	struct clk *axi_clk;	   /* CPU access to memory */
+	struct clk *core_clk;	   /* CPU core */
+	struct clk *reg_clk;	   /* CPU access registers */
+	struct clk *rom_clk;	   /* Boot ROM */
 	void __iomem *axi_halt_base;
 	void __iomem *restart_reg;
 	struct regulator *vreg;
+	struct regulator *vreg_cx;
 	struct regulator *vreg_mx;
+	struct regulator *vreg_pll;
 	bool is_booted;
 	struct pil_desc desc;
 };

@@ -29,6 +29,7 @@
 
 #include <asm/ioctls.h>
 
+
 /*
  * struct logger_log - represents a specific log, such as 'main' or 'radio'
  *
@@ -452,8 +453,9 @@ ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	struct timespec now;
 	ssize_t ret = 0;
 
-	now = current_kernel_time();
+//[DA80] ===> BugID#789 : CCI KLog Collector, added by Jimmy@CCI
 
+	now = current_kernel_time();
 	header.pid = current->tgid;
 	header.tid = current->pid;
 	header.sec = now.tv_sec;
@@ -484,6 +486,7 @@ ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 
 		/* figure out how much of this vector we can keep */
 		len = min_t(size_t, iov->iov_len, header.len - ret);
+
 
 		/* write out this segment's payload */
 		nr = do_write_log_from_user(log, iov->iov_base, len);
@@ -728,10 +731,10 @@ static struct logger_log VAR = { \
 	.size = SIZE, \
 };
 
-DEFINE_LOGGER_DEVICE(log_main, LOGGER_LOG_MAIN, 256*1024)
-DEFINE_LOGGER_DEVICE(log_events, LOGGER_LOG_EVENTS, 256*1024)
-DEFINE_LOGGER_DEVICE(log_radio, LOGGER_LOG_RADIO, 256*1024)
-DEFINE_LOGGER_DEVICE(log_system, LOGGER_LOG_SYSTEM, 256*1024)
+DEFINE_LOGGER_DEVICE(log_main, LOGGER_LOG_MAIN, 64*1024)
+DEFINE_LOGGER_DEVICE(log_events, LOGGER_LOG_EVENTS, 64*1024)
+DEFINE_LOGGER_DEVICE(log_radio, LOGGER_LOG_RADIO, 64*1024)
+DEFINE_LOGGER_DEVICE(log_system, LOGGER_LOG_SYSTEM, 64*1024)
 
 static struct logger_log *get_log_from_minor(int minor)
 {

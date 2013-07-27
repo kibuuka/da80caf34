@@ -618,6 +618,16 @@ config INPUT_XEN_KBDDEV_FRONTEND
 	  To compile this driver as a module, choose M here: the
 	  module will be called xen-kbdfront.
 
+config PMIC8058_PWRKEY
+        tristate "PMIC8058 power key support"
+        default n
+        depends on PMIC8058
+        help
+          Say Y here if you want support for the PMIC8058 power key.
+
+          To compile this driver as a module, choose M here: the
+          module will be called pmic8058-pwrkey.
+
 config PMIC8058_OTHC
         tristate "Qualcomm PMIC8058 OTHC support"
         default n
@@ -653,5 +663,16 @@ config STM_LIS3DH
         help
           If you say yes here you get support for STMicroelectronics's
           acceleration sensors LIS3DH.
+
+config INPUT_MSM8x60_GPIO_KEY
+	tristate "Qualcomm MSM8x60 GPIO for virtual key and some keys"
+	default y
+	help
+	  This option enables device driver support for virtual key
+	  (include home, menu, back and search key) and camera key
+	  on Qualcomm MSM8x60 chip.
+
+	  To compile this driver as module, choose M here: the
+	  module will be called msm8x60-keypad.
 
 endif

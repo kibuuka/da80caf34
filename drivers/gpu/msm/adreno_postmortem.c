@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -69,6 +69,8 @@ static const struct pm_id_name pm3_types[] = {
 	{CP_SET_PROTECTED_MODE,	"ST_PRT_M"},
 	{CP_SET_SHADER_BASES,		"ST_SHD_B"},
 	{CP_WAIT_FOR_IDLE,		"WAIT4IDL"},
+	{CP_WAIT_FOR_ME,		"WAIT4ME"},
+	{CP_WAIT_REG_EQ,		"WAITRGEQ"},
 };
 
 static const struct pm_id_name pm3_nop_values[] = {
@@ -188,8 +190,9 @@ static void adreno_dump_regs(struct kgsl_device *device,
 	}
 }
 
-static void dump_ib(struct kgsl_device *device, char* buffId, uint32_t pt_base,
-	uint32_t base_offset, uint32_t ib_base, uint32_t ib_size, bool dump)
+static void dump_ib(struct kgsl_device *device, char *buffId,
+	phys_addr_t pt_base, uint32_t base_offset, uint32_t ib_base,
+	uint32_t ib_size, bool dump)
 {
 	uint8_t *base_addr = adreno_convertaddr(device, pt_base,
 		ib_base, ib_size*sizeof(uint32_t));
@@ -212,7 +215,7 @@ struct ib_list {
 	uint32_t offsets[IB_LIST_SIZE];
 };
 
-static void dump_ib1(struct kgsl_device *device, uint32_t pt_base,
+static void dump_ib1(struct kgsl_device *device, phys_addr_t pt_base,
 			uint32_t base_offset,
 			uint32_t ib1_base, uint32_t ib1_size,
 			struct ib_list *ib_list, bool dump)
@@ -305,7 +308,7 @@ static bool adreno_rb_use_hex(void)
 #endif
 }
 
-static void adreno_dump_rb(struct kgsl_device *device, const void *buf,
+void adreno_dump_rb(struct kgsl_device *device, const void *buf,
 			 size_t len, int start, int size)
 {
 	const uint32_t *ptr = buf;
@@ -702,7 +705,7 @@ static void adreno_dump_a2xx(struct kgsl_device *device)
 		" %08X\n", r1, r2, r3);
 
 	KGSL_LOG_DUMP(device, "PAGETABLE SIZE: %08X ",
-		kgsl_mmu_get_ptsize());
+		kgsl_mmu_get_ptsize(&device->mmu));
 
 	kgsl_regread(device, MH_MMU_TRAN_ERROR, &r1);
 	KGSL_LOG_DUMP(device, "        TRAN_ERROR = %08X\n", r1);
@@ -717,7 +720,7 @@ int adreno_dump(struct kgsl_device *device, int manual)
 {
 	unsigned int cp_ib1_base, cp_ib1_bufsz;
 	unsigned int cp_ib2_base, cp_ib2_bufsz;
-	unsigned int pt_base, cur_pt_base;
+	phys_addr_t pt_base, cur_pt_base;
 	unsigned int cp_rb_base, cp_rb_ctrl, rb_count;
 	unsigned int cp_rb_wptr, cp_rb_rptr;
 	unsigned int i;
@@ -729,6 +732,7 @@ int adreno_dump(struct kgsl_device *device, int manual)
 	unsigned int ts_processed = 0xdeaddead;
 	struct kgsl_context *context;
 	unsigned int context_id;
+	unsigned int rbbm_status;
 
 	static struct ib_list ib_list;
 
@@ -738,12 +742,16 @@ int adreno_dump(struct kgsl_device *device, int manual)
 
 	mb();
 
-	msm_clk_dump_debug_info();
+	if (device->pm_dump_enable) {
+		msm_clk_dump_debug_info();
 
-	if (adreno_is_a2xx(adreno_dev))
-		adreno_dump_a2xx(device);
-	else if (adreno_is_a3xx(adreno_dev))
-		adreno_dump_a3xx(device);
+		if (adreno_is_a2xx(adreno_dev))
+			adreno_dump_a2xx(device);
+		else if (adreno_is_a3xx(adreno_dev))
+			adreno_dump_a3xx(device);
+	}
+
+	kgsl_regread(device, adreno_dev->gpudev->reg_rbbm_status, &rbbm_status);
 
 	pt_base = kgsl_mmu_get_current_ptbase(&device->mmu);
 	cur_pt_base = pt_base;
@@ -758,6 +766,18 @@ int adreno_dump(struct kgsl_device *device, int manual)
 	kgsl_regread(device, REG_CP_IB2_BASE, &cp_ib2_base);
 	kgsl_regread(device, REG_CP_IB2_BUFSZ, &cp_ib2_bufsz);
 
+	/* If postmortem dump is not enabled, dump minimal set and return */
+	if (!device->pm_dump_enable) {
+
+		KGSL_LOG_DUMP(device,
+			"STATUS %08X | IB1:%08X/%08X | IB2: %08X/%08X"
+			" | RPTR: %04X | WPTR: %04X\n",
+			rbbm_status,  cp_ib1_base, cp_ib1_bufsz, cp_ib2_base,
+			cp_ib2_bufsz, cp_rb_rptr, cp_rb_wptr);
+
+		return 0;
+	}
+
 	kgsl_sharedmem_readl(&device->memstore,
 			(unsigned int *) &context_id,
 			KGSL_MEMSTORE_OFFSET(KGSL_MEMSTORE_GLOBAL,
@@ -766,7 +786,7 @@ int adreno_dump(struct kgsl_device *device, int manual)
 	if (context) {
 		ts_processed = kgsl_readtimestamp(device, context,
 						  KGSL_TIMESTAMP_RETIRED);
-		KGSL_LOG_DUMP(device, "CTXT: %d  TIMESTM RTRD: %08X\n",
+		KGSL_LOG_DUMP(device, "FT CTXT: %d  TIMESTM RTRD: %08X\n",
 				context->id, ts_processed);
 	} else
 		KGSL_LOG_DUMP(device, "BAD CTXT: %d\n", context_id);
@@ -837,21 +857,26 @@ int adreno_dump(struct kgsl_device *device, int manual)
 			(num_iommu_units && this_cmd ==
 			kgsl_mmu_get_reg_gpuaddr(&device->mmu, 0,
 						KGSL_IOMMU_CONTEXT_USER,
-						KGSL_IOMMU_CTX_TTBR0))) {
-			KGSL_LOG_DUMP(device, "Current pagetable: %x\t"
-				"pagetable base: %x\n",
+						KGSL_IOMMU_CTX_TTBR0)) ||
+			(num_iommu_units && this_cmd == cp_type0_packet(
+						kgsl_mmu_get_reg_ahbaddr(
+						&device->mmu, 0,
+						KGSL_IOMMU_CONTEXT_USER,
+						KGSL_IOMMU_CTX_TTBR0), 1))) {
+			KGSL_LOG_DUMP(device,
+				"Current pagetable: %x\t pagetable base: %pa\n",
 				kgsl_mmu_get_ptname_from_ptbase(&device->mmu,
 								cur_pt_base),
-				cur_pt_base);
+				&cur_pt_base);
 
 			/* Set cur_pt_base to the new pagetable base */
 			cur_pt_base = rb_copy[read_idx++];
 
-			KGSL_LOG_DUMP(device, "New pagetable: %x\t"
-				"pagetable base: %x\n",
+			KGSL_LOG_DUMP(device,
+				"New pagetable: %x\t pagetable base: %pa\n",
 				kgsl_mmu_get_ptname_from_ptbase(&device->mmu,
 								cur_pt_base),
-				cur_pt_base);
+				&cur_pt_base);
 		}
 	}
 
@@ -912,7 +937,8 @@ int adreno_dump(struct kgsl_device *device, int manual)
 			adreno_dump_regs(device, a3xx_registers,
 					a3xx_registers_count);
 
-			if (adreno_is_a330(adreno_dev))
+			if (adreno_is_a330(adreno_dev) ||
+				adreno_is_a305b(adreno_dev))
 				adreno_dump_regs(device, a330_registers,
 					a330_registers_count);
 		}

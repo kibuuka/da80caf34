@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2009-2011, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -107,6 +107,22 @@ struct pmic8058_charger_data {
 	int charger_type;
 	bool charger_data_valid;
 };
+
+//kibuuka: test
+struct pm8058_gpio {
+	int		direction;
+	int		output_buffer;
+	int		output_value;
+	int		pull;
+	int		vin_sel;	/* 0..7 */
+	int		out_strength;
+	int		function;
+	int		inv_int_pol;	/* invert interrupt polarity */
+	int		disable_pin;	/* disable pin and tri-state its pad */
+};
+
+int pm8058_gpio_config(int gpio, struct pm8058_gpio *param);
+//kibuuka: test
 
 struct pm8058_platform_data {
 	struct pm8xxx_mpp_platform_data		*mpp_pdata;

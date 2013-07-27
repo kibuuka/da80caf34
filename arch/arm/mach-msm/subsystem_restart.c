@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -30,6 +30,8 @@
 #include <linux/device.h>
 #include <linux/idr.h>
 #include <linux/debugfs.h>
+#include <linux/miscdevice.h>
+#include <linux/interrupt.h>
 
 #include <asm/current.h>
 
@@ -38,6 +40,9 @@
 #include <mach/subsystem_restart.h>
 
 #include "smd_private.h"
+
+static int enable_debug;
+module_param(enable_debug, int, S_IRUGO | S_IWUSR);
 
 /**
  * enum p_subsys_state - state of a subsystem (private)
@@ -69,6 +74,11 @@ enum subsys_state {
 static const char * const subsys_states[] = {
 	[SUBSYS_OFFLINE] = "OFFLINE",
 	[SUBSYS_ONLINE] = "ONLINE",
+};
+
+static const char * const restart_levels[] = {
+	[RESET_SOC] = "SYSTEM",
+	[RESET_SUBSYS_COUPLED] = "RELATED",
 };
 
 /**
@@ -122,9 +132,11 @@ struct restart_log {
  * @owner: module that provides @desc
  * @count: reference count of subsystem_get()/subsystem_put()
  * @id: ida
+ * @restart_level: restart level (0 - panic, 1 - related, 2 - independent, etc.)
  * @restart_order: order of other devices this devices restarts with
  * @dentry: debugfs directory for this device
  * @do_ramdump_on_put: ramdump on subsystem_put() if true
+ * @err_ready: completion variable to record error ready from subsystem
  */
 struct subsys_device {
 	struct subsys_desc *desc;
@@ -139,11 +151,15 @@ struct subsys_device {
 	struct module *owner;
 	int count;
 	int id;
+	int restart_level;
 	struct subsys_soc_restart_order *restart_order;
 #ifdef CONFIG_DEBUG_FS
 	struct dentry *dentry;
 #endif
 	bool do_ramdump_on_put;
+	struct miscdevice misc_dev;
+	char miscdevice_name[32];
+	struct completion err_ready;
 };
 
 static struct subsys_device *to_subsys(struct device *d)
@@ -163,6 +179,38 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 	enum subsys_state state = to_subsys(dev)->track.state;
 	return snprintf(buf, PAGE_SIZE, "%s\n", subsys_states[state]);
 }
+
+static ssize_t
+restart_level_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	int level = to_subsys(dev)->restart_level;
+	return snprintf(buf, PAGE_SIZE, "%s\n", restart_levels[level]);
+}
+
+static ssize_t restart_level_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct subsys_device *subsys = to_subsys(dev);
+	int i;
+	const char *p;
+
+	p = memchr(buf, '\n', count);
+	if (p)
+		count = p - buf;
+
+	for (i = 0; i < ARRAY_SIZE(restart_levels); i++)
+		if (!strncasecmp(buf, restart_levels[i], count)) {
+			subsys->restart_level = i;
+			return count;
+		}
+	return -EPERM;
+}
+
+int subsys_get_restart_level(struct subsys_device *dev)
+{
+	return dev->restart_level;
+}
+EXPORT_SYMBOL(subsys_get_restart_level);
 
 static void subsys_set_state(struct subsys_device *subsys,
 			     enum subsys_state state)
@@ -196,6 +244,7 @@ EXPORT_SYMBOL(subsys_default_online);
 static struct device_attribute subsys_attrs[] = {
 	__ATTR_RO(name),
 	__ATTR_RO(state),
+	__ATTR(restart_level, 0644, restart_level_show, restart_level_store),
 	__ATTR_NULL,
 };
 
@@ -255,48 +304,6 @@ static struct subsys_soc_restart_order *restart_orders_8960_sglte[] = {
  */
 static struct subsys_soc_restart_order **restart_orders;
 static int n_restart_orders;
-
-static int restart_level = RESET_SOC;
-
-int get_restart_level()
-{
-	return restart_level;
-}
-EXPORT_SYMBOL(get_restart_level);
-
-static int restart_level_set(const char *val, struct kernel_param *kp)
-{
-	int ret;
-	int old_val = restart_level;
-
-	if (cpu_is_msm9615()) {
-		pr_err("Only Phase 1 subsystem restart is supported\n");
-		return -EINVAL;
-	}
-
-	ret = param_set_int(val, kp);
-	if (ret)
-		return ret;
-
-	switch (restart_level) {
-	case RESET_SUBSYS_INDEPENDENT:
-		if (socinfo_get_platform_subtype() == PLATFORM_SUBTYPE_SGLTE) {
-			pr_info("Phase 3 is currently unsupported. Using phase 2 instead.\n");
-			restart_level = RESET_SUBSYS_COUPLED;
-		}
-	case RESET_SUBSYS_COUPLED:
-	case RESET_SOC:
-		pr_info("Phase %d behavior activated.\n", restart_level);
-		break;
-	default:
-		restart_level = old_val;
-		return -EINVAL;
-	}
-	return 0;
-}
-
-module_param_call(restart_level, restart_level_set, param_get_int,
-			&restart_level, 0644);
 
 static struct subsys_soc_restart_order *
 update_restart_order(struct subsys_device *dev)
@@ -398,17 +405,34 @@ static void for_each_subsys_device(struct subsys_device **list, unsigned count,
 	}
 }
 
-static void __send_notification_to_order(struct subsys_device *dev, void *data)
+static void notify_each_subsys_device(struct subsys_device **list,
+		unsigned count,
+		enum subsys_notif_type notif, void *data)
 {
-	enum subsys_notif_type type = (enum subsys_notif_type)data;
-
-	subsys_notif_queue_notification(dev->notify, type);
+	while (count--) {
+		enum subsys_notif_type type = (enum subsys_notif_type)type;
+		struct subsys_device *dev = *list++;
+		if (!dev)
+			continue;
+		subsys_notif_queue_notification(dev->notify, notif, data);
+	}
 }
 
-static void send_notification_to_order(struct subsys_device **l, unsigned n,
-		enum subsys_notif_type t)
+static int wait_for_err_ready(struct subsys_device *subsys)
 {
-	for_each_subsys_device(l, n, (void *)t, __send_notification_to_order);
+	int ret;
+
+	if (!subsys->desc->err_ready_irq || enable_debug == 1)
+		return 0;
+
+	ret = wait_for_completion_timeout(&subsys->err_ready,
+					  msecs_to_jiffies(10000));
+	if (!ret) {
+		pr_err("[%s]: Error ready timed out\n", subsys->desc->name);
+		return -ETIMEDOUT;
+	}
+
+	return 0;
 }
 
 static void subsystem_shutdown(struct subsys_device *dev, void *data)
@@ -435,10 +459,17 @@ static void subsystem_ramdump(struct subsys_device *dev, void *data)
 static void subsystem_powerup(struct subsys_device *dev, void *data)
 {
 	const char *name = dev->desc->name;
+	int ret;
 
 	pr_info("[%p]: Powering up %s\n", current, name);
+	init_completion(&dev->err_ready);
 	if (dev->desc->powerup(dev->desc) < 0)
-		panic("[%p]: Failed to powerup %s!", current, name);
+		panic("[%p]: Powerup error: %s!", current, name);
+
+	ret = wait_for_err_ready(dev);
+	if (ret)
+		panic("[%p]: Timed out waiting for error ready: %s!",
+			current, name);
 	subsys_set_state(dev, SUBSYS_ONLINE);
 }
 
@@ -464,8 +495,21 @@ static int subsys_start(struct subsys_device *subsys)
 {
 	int ret;
 
+	init_completion(&subsys->err_ready);
 	ret = subsys->desc->start(subsys->desc);
-	if (!ret)
+	if (ret)
+		return ret;
+
+	if (subsys->desc->is_not_loadable)
+		return 0;
+
+	ret = wait_for_err_ready(subsys);
+	if (ret)
+		/* pil-boot succeeded but we need to shutdown
+		 * the device because error ready timed out.
+		 */
+		subsys->desc->stop(subsys->desc);
+	else
 		subsys_set_state(subsys, SUBSYS_ONLINE);
 
 	return ret;
@@ -481,7 +525,7 @@ static struct subsys_tracking *subsys_get_track(struct subsys_device *subsys)
 {
 	struct subsys_soc_restart_order *order = subsys->restart_order;
 
-	if (restart_level != RESET_SUBSYS_INDEPENDENT && order)
+	if (order)
 		return &order->track;
 	else
 		return &subsys->track;
@@ -600,7 +644,7 @@ static void subsystem_restart_wq_func(struct work_struct *work)
 	 * This is because the subsystem list inside the relevant
 	 * restart order is not being traversed.
 	 */
-	if (restart_level != RESET_SUBSYS_INDEPENDENT && order) {
+	if (order) {
 		list = order->subsys_ptrs;
 		count = order->count;
 		track = &order->track;
@@ -622,9 +666,12 @@ static void subsystem_restart_wq_func(struct work_struct *work)
 
 	pr_debug("[%p]: Starting restart sequence for %s\n", current,
 			desc->name);
-	send_notification_to_order(list, count, SUBSYS_BEFORE_SHUTDOWN);
+	notify_each_subsys_device(list, count, SUBSYS_BEFORE_SHUTDOWN, NULL);
 	for_each_subsys_device(list, count, NULL, subsystem_shutdown);
-	send_notification_to_order(list, count, SUBSYS_AFTER_SHUTDOWN);
+	notify_each_subsys_device(list, count, SUBSYS_AFTER_SHUTDOWN, NULL);
+
+	notify_each_subsys_device(list, count, SUBSYS_RAMDUMP_NOTIFICATION,
+							  &enable_ramdumps);
 
 	spin_lock_irqsave(&track->s_lock, flags);
 	track->p_state = SUBSYS_RESTARTING;
@@ -633,9 +680,9 @@ static void subsystem_restart_wq_func(struct work_struct *work)
 	/* Collect ram dumps for all subsystems in order here */
 	for_each_subsys_device(list, count, NULL, subsystem_ramdump);
 
-	send_notification_to_order(list, count, SUBSYS_BEFORE_POWERUP);
+	notify_each_subsys_device(list, count, SUBSYS_BEFORE_POWERUP, NULL);
 	for_each_subsys_device(list, count, NULL, subsystem_powerup);
-	send_notification_to_order(list, count, SUBSYS_AFTER_POWERUP);
+	notify_each_subsys_device(list, count, SUBSYS_AFTER_POWERUP, NULL);
 
 	pr_info("[%p]: Restart sequence for %s completed.\n",
 			current, desc->name);
@@ -656,7 +703,8 @@ static void __subsystem_restart_dev(struct subsys_device *dev)
 	struct subsys_tracking *track;
 	unsigned long flags;
 
-	pr_debug("Restarting %s [level=%d]!\n", desc->name, restart_level);
+	pr_debug("Restarting %s [level=%s]!\n", desc->name,
+			restart_levels[dev->restart_level]);
 
 	track = subsys_get_track(dev);
 	/*
@@ -702,13 +750,12 @@ int subsystem_restart_dev(struct subsys_device *dev)
 		return -EBUSY;
 	}
 
-	pr_info("Restart sequence requested for %s, restart_level = %d.\n",
-		name, restart_level);
+	pr_info("Restart sequence requested for %s, restart_level = %s.\n",
+		name, restart_levels[dev->restart_level]);
 
-	switch (restart_level) {
+	switch (dev->restart_level) {
 
 	case RESET_SUBSYS_COUPLED:
-	case RESET_SUBSYS_INDEPENDENT:
 		__subsystem_restart_dev(dev);
 		break;
 	case RESET_SOC:
@@ -847,6 +894,41 @@ static int subsys_debugfs_add(struct subsys_device *subsys) { return 0; }
 static void subsys_debugfs_remove(struct subsys_device *subsys) { }
 #endif
 
+static int subsys_device_open(struct inode *inode, struct file *file)
+{
+	void *retval;
+	struct subsys_device *subsys_dev = container_of(file->private_data,
+		struct subsys_device, misc_dev);
+
+	if (!file->private_data)
+		return -EINVAL;
+
+	retval = subsystem_get(subsys_dev->desc->name);
+	if (IS_ERR(retval))
+		return PTR_ERR(retval);
+
+	return 0;
+}
+
+static int subsys_device_close(struct inode *inode, struct file *file)
+{
+	struct subsys_device *subsys_dev = container_of(file->private_data,
+		struct subsys_device, misc_dev);
+
+	if (!file->private_data)
+		return -EINVAL;
+
+	subsystem_put(subsys_dev);
+
+	return 0;
+}
+
+static const struct file_operations subsys_device_fops = {
+		.owner = THIS_MODULE,
+		.open = subsys_device_open,
+		.release = subsys_device_close,
+};
+
 static void subsys_device_release(struct device *dev)
 {
 	struct subsys_device *subsys = to_subsys(dev);
@@ -855,6 +937,45 @@ static void subsys_device_release(struct device *dev)
 	mutex_destroy(&subsys->track.lock);
 	ida_simple_remove(&subsys_ida, subsys->id);
 	kfree(subsys);
+}
+static irqreturn_t subsys_err_ready_intr_handler(int irq, void *subsys)
+{
+	struct subsys_device *subsys_dev = subsys;
+	pr_info("Error ready interrupt occured for %s\n",
+		 subsys_dev->desc->name);
+
+	if (subsys_dev->desc->is_not_loadable)
+		return IRQ_HANDLED;
+
+	complete(&subsys_dev->err_ready);
+	return IRQ_HANDLED;
+}
+
+static int subsys_misc_device_add(struct subsys_device *subsys_dev)
+{
+	int ret;
+	memset(subsys_dev->miscdevice_name, 0,
+			ARRAY_SIZE(subsys_dev->miscdevice_name));
+	snprintf(subsys_dev->miscdevice_name,
+			 ARRAY_SIZE(subsys_dev->miscdevice_name), "subsys_%s",
+			 subsys_dev->desc->name);
+
+	subsys_dev->misc_dev.minor = MISC_DYNAMIC_MINOR;
+	subsys_dev->misc_dev.name = subsys_dev->miscdevice_name;
+	subsys_dev->misc_dev.fops = &subsys_device_fops;
+	subsys_dev->misc_dev.parent = &subsys_dev->dev;
+
+	ret = misc_register(&subsys_dev->misc_dev);
+	if (ret) {
+		pr_err("%s: misc_register() failed for %s (%d)", __func__,
+				subsys_dev->miscdevice_name, ret);
+	}
+	return ret;
+}
+
+static void subsys_misc_device_remove(struct subsys_device *subsys_dev)
+{
+	misc_deregister(&subsys_dev->misc_dev);
 }
 
 struct subsys_device *subsys_register(struct subsys_desc *desc)
@@ -895,12 +1016,34 @@ struct subsys_device *subsys_register(struct subsys_desc *desc)
 
 	ret = device_register(&subsys->dev);
 	if (ret) {
+		device_unregister(&subsys->dev);
+		goto err_register;
+	}
+
+	ret = subsys_misc_device_add(subsys);
+	if (ret) {
 		put_device(&subsys->dev);
 		goto err_register;
 	}
 
+	if (subsys->desc->err_ready_irq) {
+		ret = devm_request_irq(&subsys->dev,
+					subsys->desc->err_ready_irq,
+					subsys_err_ready_intr_handler,
+					IRQF_TRIGGER_RISING,
+					"error_ready_interrupt", subsys);
+		if (ret < 0) {
+			dev_err(&subsys->dev,
+				"[%s]: Unable to register err ready handler\n",
+				subsys->desc->name);
+			goto err_misc_device;
+		}
+	}
+
 	return subsys;
 
+err_misc_device:
+	subsys_misc_device_remove(subsys);
 err_register:
 	subsys_debugfs_remove(subsys);
 err_debugfs:
@@ -924,6 +1067,7 @@ void subsys_unregister(struct subsys_device *subsys)
 		device_unregister(&subsys->dev);
 		mutex_unlock(&subsys->track.lock);
 		subsys_debugfs_remove(subsys);
+		subsys_misc_device_remove(subsys);
 		put_device(&subsys->dev);
 	}
 }

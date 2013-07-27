@@ -1,7 +1,7 @@
 /*
  * Copyright (C) 2008 Google, Inc.
  * Copyright (C) 2008 HTC Corporation
- * Copyright (c) 2012 Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013 The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -82,6 +82,9 @@ struct msm_audio {
 	int periods;
 	int mmap_flag;
 	atomic_t pending_buffer;
+	bool set_channel_map;
+	char channel_map[8];
+	int cmd_interrupt;
 };
 
 struct output_meta_data_st {
@@ -90,6 +93,10 @@ struct output_meta_data_st {
 	uint32_t timestamp_lsw;
 	uint32_t timestamp_msw;
 	uint32_t reserved[12];
+};
+
+struct msm_plat_data {
+	int perf_mode;
 };
 
 #endif /*_MSM_PCM_H*/

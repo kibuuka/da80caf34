@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2011, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -50,6 +50,18 @@ enum msm_hardware_charger_state {
 	CHG_READY_STATE,
 	CHG_CHARGING_STATE,
 };
+// modified by yafi-begin
+#if defined(ORG_VER)
+#else
+enum module_loading_op
+{
+	LOADING_SUM,
+	LOADING_SET,
+	LOADING_CLR,
+	LOADING_GET,
+};
+#endif
+// modified by yafi-end
 
 struct msm_hardware_charger {
 	int type;

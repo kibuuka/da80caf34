@@ -1,4 +1,4 @@
-/* linux/include/asm-arm/arch-msm/hsusb.h
+/* include/linux/usb/msm_hsusb.h
  *
  * Copyright (C) 2008 Google, Inc.
  * Author: Brian Swetland <swetland@google.com>
@@ -201,6 +201,7 @@ enum usb_vdd_value {
  *              USB enters LPM.
  * @delay_lpm_on_disconnect: Use a delay before entering LPM
  *              upon USB cable disconnection.
+ * @enable_sec_phy: Use second HSPHY with USB2 core
  * @bus_scale_table: parameters for bus bandwidth requirements
  * @mhl_dev_name: MHL device name used to register with MHL driver.
  */
@@ -221,9 +222,16 @@ struct msm_otg_platform_data {
 	bool enable_lpm_on_dev_suspend;
 	bool core_clk_always_on_workaround;
 	bool delay_lpm_on_disconnect;
+	bool delay_lpm_hndshk_on_disconnect;
+	bool dp_manual_pullup;
+	bool enable_sec_phy;
 	struct msm_bus_scale_pdata *bus_scale_table;
 	const char *mhl_dev_name;
 };
+
+/* phy related flags */
+#define ENABLE_DP_MANUAL_PULLUP		BIT(0)
+#define ENABLE_SECONDARY_PHY		BIT(1)
 
 /* Timeout (in msec) values (min - max) associated with OTG timers */
 
@@ -275,6 +283,7 @@ struct msm_otg_platform_data {
  * @pclk: clock struct of iface_clk.
  * @phy_reset_clk: clock struct of phy_clk.
  * @core_clk: clock struct of core_bus_clk.
+ * @core_clk_rate: core clk max frequency
  * @regs: ioremapped register base address.
  * @inputs: OTG state machine inputs(Id, SessValid etc).
  * @sm_work: OTG state machine work.
@@ -304,10 +313,12 @@ struct msm_otg {
 	struct msm_otg_platform_data *pdata;
 	int irq;
 	int async_irq;
+	struct clk *xo_clk;
 	struct clk *clk;
 	struct clk *pclk;
 	struct clk *phy_reset_clk;
 	struct clk *core_clk;
+	long core_clk_rate;
 	void __iomem *regs;
 #define ID		0
 #define B_SESS_VLD	1
@@ -395,23 +406,33 @@ struct msm_hsic_host_platform_data {
 	unsigned strobe;
 	unsigned data;
 	bool ignore_cal_pad_config;
+	bool phy_sof_workaround;
 	int strobe_pad_offset;
 	int data_pad_offset;
 
 	struct msm_bus_scale_pdata *bus_scale_table;
 	unsigned log2_irq_thresh;
 
+	/* gpio used to resume peripheral */
+	unsigned resume_gpio;
+
 	/*swfi latency is required while driving resume on to the bus */
 	u32 swfi_latency;
 
 	/*standalone latency is required when HSCI is active*/
 	u32 standalone_latency;
+	bool pool_64_bit_align;
+	bool enable_hbm;
+	bool disable_park_mode;
+	bool consider_ipa_handshake;
+	bool ahb_async_bridge_bypass;
 };
 
 struct msm_usb_host_platform_data {
 	unsigned int power_budget;
 	int pmic_gpio_dp_irq;
 	unsigned int dock_connect_irq;
+	bool use_sec_phy;
 };
 
 /**
@@ -422,66 +443,6 @@ struct msm_usb_host_platform_data {
  */
 struct msm_hsic_peripheral_platform_data {
 	bool core_clk_always_on_workaround;
-};
-
-enum usb_pipe_mem_type {
-	SPS_PIPE_MEM = 0,	/* Default, SPS dedicated pipe memory */
-	USB_PRIVATE_MEM,	/* USB's private memory */
-	SYSTEM_MEM,		/* System RAM, requires allocation */
-};
-
-/**
- * struct usb_bam_pipe_connect: pipe connection information
- * between USB/HSIC BAM and another BAM. USB/HSIC BAM can be
- * either src BAM or dst BAM
- * @src_phy_addr: src bam physical address.
- * @src_pipe_index: src bam pipe index.
- * @dst_phy_addr: dst bam physical address.
- * @dst_pipe_index: dst bam pipe index.
- * @mem_type: type of memory used for BAM FIFOs
- * @data_fifo_base_offset: data fifo offset.
- * @data_fifo_size: data fifo size.
- * @desc_fifo_base_offset: descriptor fifo offset.
- * @desc_fifo_size: descriptor fifo size.
- */
-struct usb_bam_pipe_connect {
-	u32 src_phy_addr;
-	u32 src_pipe_index;
-	u32 dst_phy_addr;
-	u32 dst_pipe_index;
-	enum usb_pipe_mem_type mem_type;
-	u32 data_fifo_base_offset;
-	u32 data_fifo_size;
-	u32 desc_fifo_base_offset;
-	u32 desc_fifo_size;
-};
-
-enum usb_bam {
-	SSUSB_BAM = 0,
-	HSUSB_BAM,
-	HSIC_BAM,
-	MAX_BAMS,
-};
-
-/**
- * struct msm_usb_bam_platform_data: pipe connection information
- * between USB/HSIC BAM and another BAM. USB/HSIC BAM can be
- * either src BAM or dst BAM
- * @connections: holds all pipe connections data.
- * @usb_active_bam: set USB or HSIC as the active BAM.
- * @usb_bam_num_pipes: max number of pipes to use.
- * @active_conn_num: number of active pipe connections.
- * @usb_base_address: BAM physical address.
- * @ignore_core_reset_ack: BAM can ignore ACK from USB core during PIPE RESET
- */
-struct msm_usb_bam_platform_data {
-	struct usb_bam_pipe_connect *connections;
-	int usb_active_bam;
-	int usb_bam_num_pipes;
-	u32 total_bam_num;
-	u32 usb_base_address;
-	bool ignore_core_reset_ack;
-	bool reset_on_connect[MAX_BAMS];
 };
 
 /**
@@ -504,10 +465,21 @@ struct usb_ext_notification {
 	int (*notify)(void *, int, void (*)(int online));
 	void *ctxt;
 };
-
+#ifdef CONFIG_USB_BAM
+bool msm_bam_lpm_ok(void);
+void msm_bam_set_hsic_host_dev(struct device *dev);
+void msm_bam_wait_for_hsic_prod_granted(void);
+bool msm_bam_hsic_lpm_ok(void);
+void msm_bam_hsic_notify_on_resume(void);
+#else
+static inline bool msm_bam_lpm_ok(void) { return true; }
+static inline void msm_bam_set_hsic_host_dev(struct device *dev) {}
+static inline void msm_bam_wait_for_hsic_prod_granted(void) {}
+static inline bool msm_bam_hsic_lpm_ok(void) { return true; }
+static inline void msm_bam_hsic_notify_on_resume(void) {}
+#endif
 #ifdef CONFIG_USB_CI13XXX_MSM
 void msm_hw_bam_disable(bool bam_disable);
-
 #else
 static inline void msm_hw_bam_disable(bool bam_disable)
 {
@@ -520,8 +492,9 @@ int msm_ep_unconfig(struct usb_ep *ep);
 int msm_data_fifo_config(struct usb_ep *ep, u32 addr, u32 size,
 	u8 dst_pipe_idx);
 
-int msm_register_usb_ext_notification(struct usb_ext_notification *info);
+void msm_dwc3_restart_usb_session(void);
 
+int msm_register_usb_ext_notification(struct usb_ext_notification *info);
 #else
 static inline int msm_data_fifo_config(struct usb_ep *ep, u32 addr, u32 size,
 	u8 dst_pipe_idx)
@@ -537,6 +510,11 @@ static inline int msm_ep_config(struct usb_ep *ep)
 static inline int msm_ep_unconfig(struct usb_ep *ep)
 {
 	return -ENODEV;
+}
+
+static inline void msm_dwc3_restart_usb_session(void)
+{
+	return;
 }
 
 static inline int msm_register_usb_ext_notification(

@@ -1,7 +1,7 @@
 /* arch/arm/mach-msm/memory.c
  *
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2009-2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/memory_alloc.h>
 #include <linux/memblock.h>
+#include <asm/memblock.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
 #include <asm/mach/map.h>
@@ -34,7 +35,6 @@
 #include <linux/completion.h>
 #include <linux/err.h>
 #endif
-#include <linux/android_pmem.h>
 #include <mach/msm_iomap.h>
 #include <mach/socinfo.h>
 #include <linux/sched.h>
@@ -107,57 +107,6 @@ void invalidate_caches(unsigned long vstart,
 	outer_inv_range(pstart, pstart + length);
 }
 
-void * __init alloc_bootmem_aligned(unsigned long size, unsigned long alignment)
-{
-	void *unused_addr = NULL;
-	unsigned long addr, tmp_size, unused_size;
-
-	/* Allocate maximum size needed, see where it ends up.
-	 * Then free it -- in this path there are no other allocators
-	 * so we can depend on getting the same address back
-	 * when we allocate a smaller piece that is aligned
-	 * at the end (if necessary) and the piece we really want,
-	 * then free the unused first piece.
-	 */
-
-	tmp_size = size + alignment - PAGE_SIZE;
-	addr = (unsigned long)alloc_bootmem(tmp_size);
-	free_bootmem(__pa(addr), tmp_size);
-
-	unused_size = alignment - (addr % alignment);
-	if (unused_size)
-		unused_addr = alloc_bootmem(unused_size);
-
-	addr = (unsigned long)alloc_bootmem(size);
-	if (unused_size)
-		free_bootmem(__pa(unused_addr), unused_size);
-
-	return (void *)addr;
-}
-
-int (*change_memory_power)(u64, u64, int);
-
-int platform_physical_remove_pages(u64 start, u64 size)
-{
-	if (!change_memory_power)
-		return 0;
-	return change_memory_power(start, size, MEMORY_DEEP_POWERDOWN);
-}
-
-int platform_physical_active_pages(u64 start, u64 size)
-{
-	if (!change_memory_power)
-		return 0;
-	return change_memory_power(start, size, MEMORY_ACTIVE);
-}
-
-int platform_physical_low_power_pages(u64 start, u64 size)
-{
-	if (!change_memory_power)
-		return 0;
-	return change_memory_power(start, size, MEMORY_SELF_REFRESH);
-}
-
 char *memtype_name[] = {
 	"SMI_KERNEL",
 	"SMI",
@@ -203,8 +152,8 @@ static void __init adjust_reserve_sizes(void)
 		if (mt->flags & MEMTYPE_FLAGS_1M_ALIGN)
 			mt->size = (mt->size + SECTION_SIZE - 1) & SECTION_MASK;
 		if (mt->size > mt->limit) {
-			pr_warning("%lx size for %s too large, setting to %lx\n",
-				mt->size, memtype_name[i], mt->limit);
+			pr_warning("%pa size for %s too large, setting to %pa\n",
+				&mt->size, memtype_name[i], &mt->limit);
 			mt->size = mt->limit;
 		}
 	}
@@ -212,38 +161,18 @@ static void __init adjust_reserve_sizes(void)
 
 static void __init reserve_memory_for_mempools(void)
 {
-	int memtype, memreg_type;
+	int memtype;
 	struct memtype_reserve *mt;
-	struct memblock_region *mr, *mr_candidate = NULL;
-	int ret;
+	phys_addr_t alignment;
 
 	mt = &reserve_info->memtype_reserve_table[0];
 	for (memtype = 0; memtype < MEMTYPE_MAX; memtype++, mt++) {
 		if (mt->flags & MEMTYPE_FLAGS_FIXED || !mt->size)
 			continue;
-
-		/* Choose the memory block with the highest physical
-		 * address which is large enough, so that we will not
-		 * take memory from the lowest memory bank which the kernel
-		 * is in (and cause boot problems) and so that we might
-		 * be able to steal memory that would otherwise become
-		 * highmem.
-		 */
-		for_each_memblock(memory, mr) {
-			memreg_type =
-				reserve_info->paddr_to_memtype(mr->base);
-			if (memtype != memreg_type)
-				continue;
-			if (mr->size >= mt->size
-				&& (mr_candidate == NULL
-					|| mr->base > mr_candidate->base))
-				mr_candidate = mr;
-		}
-		BUG_ON(mr_candidate == NULL);
-		/* bump mt up against the top of the region */
-		mt->start = mr_candidate->base + mr_candidate->size - mt->size;
-		ret = memblock_remove(mt->start, mt->size);
-		BUG_ON(ret);
+		alignment = (mt->flags & MEMTYPE_FLAGS_1M_ALIGN) ?
+			SZ_1M : PAGE_SIZE;
+		mt->start = arm_memblock_steal(mt->size, alignment);
+		BUG_ON(!mt->start);
 	}
 }
 
@@ -305,7 +234,7 @@ void *allocate_contiguous_ebi(unsigned long size,
 }
 EXPORT_SYMBOL(allocate_contiguous_ebi);
 
-unsigned long allocate_contiguous_ebi_nomap(unsigned long size,
+phys_addr_t allocate_contiguous_ebi_nomap(unsigned long size,
 	unsigned long align)
 {
 	return _allocate_contiguous_memory_nomap(size, get_ebi_memtype(),
@@ -386,6 +315,8 @@ int __init dt_scan_for_memory_reserve(unsigned long node, const char *uname,
 	unsigned long memory_remove_prop_length;
 	unsigned long memory_size_prop_length;
 	unsigned int *memory_size_prop;
+	unsigned int *memory_reserve_prop;
+	unsigned long memory_reserve_prop_length;
 	unsigned int memory_size;
 	unsigned int memory_start;
 	int ret;
@@ -397,7 +328,11 @@ int __init dt_scan_for_memory_reserve(unsigned long node, const char *uname,
 						"qcom,memblock-remove",
 						&memory_remove_prop_length);
 
-	if (memory_name_prop || memory_remove_prop) {
+	memory_reserve_prop = of_get_flat_dt_prop(node,
+						"qcom,memblock-reserve",
+						&memory_reserve_prop_length);
+
+	if (memory_name_prop || memory_remove_prop || memory_reserve_prop) {
 		if (!check_for_compat(node))
 			goto out;
 	} else {
@@ -436,7 +371,7 @@ mem_remove:
 	if (memory_remove_prop) {
 		if (memory_remove_prop_length != (2*sizeof(unsigned int))) {
 			WARN(1, "Memory remove malformed\n");
-			goto out;
+			goto mem_reserve;
 		}
 
 		memory_start = be32_to_cpu(memory_remove_prop[0]);
@@ -451,11 +386,52 @@ mem_remove:
 				memory_start, memory_start+memory_size);
 	}
 
+mem_reserve:
+
+	if (memory_reserve_prop) {
+		if (memory_reserve_prop_length != (2*sizeof(unsigned int))) {
+			WARN(1, "Memory reserve malformed\n");
+			goto out;
+		}
+
+		memory_start = be32_to_cpu(memory_reserve_prop[0]);
+		memory_size = be32_to_cpu(memory_reserve_prop[1]);
+
+		ret = memblock_reserve(memory_start, memory_size);
+		if (ret)
+			WARN(1, "Failed to reserve memory %x-%x\n",
+				memory_start, memory_start+memory_size);
+		else
+			pr_info("Node %s memblock_reserve memory %x-%x\n",
+				uname, memory_start, memory_start+memory_size);
+	}
+
 out:
 	return 0;
 }
 
-/* This function scans the device tree to populate the memory hole table */
+/* Function to remove any meminfo blocks which are of size zero */
+static void merge_meminfo(void)
+{
+	int i = 0;
+
+	while (i < meminfo.nr_banks) {
+		struct membank *bank = &meminfo.bank[i];
+
+		if (bank->size == 0) {
+			memmove(bank, bank + 1,
+			(meminfo.nr_banks - i) * sizeof(*bank));
+			meminfo.nr_banks--;
+			continue;
+		}
+		i++;
+	}
+}
+
+/*
+ * Function to scan the device tree and adjust the meminfo table to
+ * reflect the memory holes.
+ */
 int __init dt_scan_for_memory_hole(unsigned long node, const char *uname,
 		int depth, void *data)
 {
@@ -484,16 +460,6 @@ int __init dt_scan_for_memory_hole(unsigned long node, const char *uname,
 		hole_start = be32_to_cpu(memory_remove_prop[0]);
 		hole_size = be32_to_cpu(memory_remove_prop[1]);
 
-		if (hole_start + hole_size <= MAX_HOLE_ADDRESS) {
-			if (memory_hole_start == 0 && memory_hole_end == 0) {
-				memory_hole_start = hole_start;
-				memory_hole_end = hole_start + hole_size;
-			} else if ((memory_hole_end - memory_hole_start)
-							<= hole_size) {
-				memory_hole_start = hole_start;
-				memory_hole_end = hole_start + hole_size;
-			}
-		}
 		adjust_meminfo(hole_start, hole_size);
 	}
 
@@ -507,11 +473,10 @@ out:
  */
 void adjust_meminfo(unsigned long start, unsigned long size)
 {
-	int i, j;
+	int i;
 
-	for (i = 0, j = 0; i < meminfo.nr_banks; i++) {
-		struct membank *bank = &meminfo.bank[j];
-		*bank = meminfo.bank[i];
+	for (i = 0; i < meminfo.nr_banks; i++) {
+		struct membank *bank = &meminfo.bank[i];
 
 		if (((start + size) <= (bank->start + bank->size)) &&
 			(start >= bank->start)) {
@@ -519,15 +484,16 @@ void adjust_meminfo(unsigned long start, unsigned long size)
 				(meminfo.nr_banks - i) * sizeof(*bank));
 			meminfo.nr_banks++;
 			i++;
-			bank[1].size -= (start + size);
-			bank[1].start = (start + size);
-			bank[1].highmem = 0;
-			j++;
+
 			bank->size = start - bank->start;
+			bank[1].start = (start + size);
+			bank[1].size -= (bank->size + size);
+			bank[1].highmem = 0;
+			merge_meminfo();
 		}
-		j++;
 	}
 }
+
 unsigned long get_ddr_size(void)
 {
 	unsigned int i;

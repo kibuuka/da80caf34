@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,7 +29,6 @@
 #include <linux/fb.h>
 #include <linux/msm_mdp.h>
 #include <linux/file.h>
-#include <linux/android_pmem.h>
 #include <linux/major.h>
 #include <asm/system.h>
 #include <asm/mach-types.h>
@@ -49,6 +48,7 @@ struct mdp4_overlay_ctrl {
 	struct mdp4_overlay_pipe *baselayer[MDP4_MIXER_MAX];
 	struct blend_cfg blend[MDP4_MIXER_MAX][MDP4_MIXER_STAGE_MAX];
 	struct mdp4_overlay_pipe sf_plist[MDP4_MIXER_MAX][OVERLAY_PIPE_MAX];
+	struct mdp_mixer_cfg mdp_mixer_cfg[MDP4_MIXER_MAX];
 	uint32 mixer_cfg[MDP4_MIXER_MAX];
 	uint32 flush[MDP4_MIXER_MAX];
 	struct iommu_free_list iommu_free[MDP4_MIXER_MAX];
@@ -245,7 +245,7 @@ int mdp4_overlay_iommu_map_buf(int mem_id,
 		return PTR_ERR(*srcp_ihdl);
 	}
 	pr_debug("%s(): ion_hdl %p, ion_buf %d\n", __func__, *srcp_ihdl,
-		ion_share_dma_buf(display_iclient, *srcp_ihdl));
+		mem_id);
 	pr_debug("mixer %u, pipe %u, plane %u\n", pipe->mixer_num,
 		pipe->pipe_ndx, plane);
 	if (ion_map_iommu(display_iclient, *srcp_ihdl,
@@ -771,6 +771,7 @@ static void mdp4_overlay_vg_get_src_offset(struct mdp4_overlay_pipe *pipe,
 			break;
 
 		case MDP_YCRYCB_H2V1:
+		case MDP_CBYCRY_H2V1:
 			if (pipe->src_x & 0x1)
 				pipe->src_x += 1;
 			*luma_off += pipe->src_x * 2 +
@@ -780,6 +781,7 @@ static void mdp4_overlay_vg_get_src_offset(struct mdp4_overlay_pipe *pipe,
 		case MDP_ARGB_8888:
 		case MDP_RGBA_8888:
 		case MDP_BGRA_8888:
+		case MDP_BGRX_8888:
 		case MDP_RGBX_8888:
 		case MDP_RGB_565:
 		case MDP_BGR_565:
@@ -967,9 +969,11 @@ int mdp4_overlay_format2type(uint32 format)
 	case MDP_ARGB_8888:
 	case MDP_RGBA_8888:
 	case MDP_BGRA_8888:
+	case MDP_BGRX_8888:
 	case MDP_RGBX_8888:
 		return OVERLAY_TYPE_RGB;
 	case MDP_YCRYCB_H2V1:
+	case MDP_CBYCRY_H2V1:
 	case MDP_Y_CRCB_H2V1:
 	case MDP_Y_CBCR_H2V1:
 	case MDP_Y_CRCB_H1V2:
@@ -1137,7 +1141,42 @@ int mdp4_overlay_format2pipe(struct mdp4_overlay_pipe *pipe)
 		pipe->element0 = C1_B_Cb;	/* B */
 		pipe->bpp = 4;		/* 4 bpp */
 		break;
+	case MDP_BGRX_8888:
+		pipe->frame_format = MDP4_FRAME_FORMAT_LINEAR;
+		pipe->fetch_plane = OVERLAY_PLANE_INTERLEAVED;
+		pipe->a_bit = 3;        /* alpha, 4 bits */
+		pipe->r_bit = 3;        /* R, 8 bits */
+		pipe->b_bit = 3;        /* B, 8 bits */
+		pipe->g_bit = 3;        /* G, 8 bits */
+		pipe->alpha_enable = 0;
+		pipe->unpack_tight = 1;
+		pipe->unpack_align_msb = 0;
+		pipe->unpack_count = 3;
+		pipe->element3 = C3_ALPHA;      /* alpha */
+		pipe->element2 = C2_R_Cr;       /* R */
+		pipe->element1 = C0_G_Y;        /* G */
+		pipe->element0 = C1_B_Cb;       /* B */
+		pipe->bpp = 4;          /* 4 bpp */
+		break;
 	case MDP_YCRYCB_H2V1:
+		pipe->frame_format = MDP4_FRAME_FORMAT_LINEAR;
+		pipe->fetch_plane = OVERLAY_PLANE_INTERLEAVED;
+		pipe->a_bit = 0;	/* alpha, 4 bits */
+		pipe->r_bit = 3;	/* R, 8 bits */
+		pipe->b_bit = 3;	/* B, 8 bits */
+		pipe->g_bit = 3;	/* G, 8 bits */
+		pipe->alpha_enable = 0;
+		pipe->unpack_tight = 1;
+		pipe->unpack_align_msb = 0;
+		pipe->unpack_count = 3;
+		pipe->element3 = C1_B_Cb;	/* B */
+		pipe->element2 = C0_G_Y;	/* G */
+		pipe->element1 = C2_R_Cr;	/* R */
+		pipe->element0 = C0_G_Y;	/* G */
+		pipe->bpp = 2;		/* 2 bpp */
+		pipe->chroma_sample = MDP4_CHROMA_H2V1;
+		break;
+	case MDP_CBYCRY_H2V1:
 		pipe->frame_format = MDP4_FRAME_FORMAT_LINEAR;
 		pipe->fetch_plane = OVERLAY_PLANE_INTERLEAVED;
 		pipe->a_bit = 0;	/* alpha, 4 bits */
@@ -1324,6 +1363,7 @@ void transp_color_key(int format, uint32 transp,
 	case MDP_XRGB_8888:
 	case MDP_ARGB_8888:
 	case MDP_BGRA_8888:
+	case MDP_BGRX_8888:
 		b_start = 0;
 		g_start = 8;
 		r_start = 16;
@@ -1436,6 +1476,87 @@ uint32 mdp4_overlay_unpack_pattern(struct mdp4_overlay_pipe *pipe)
 			(pipe->element1 << 8) | pipe->element0;
 }
 
+static uint32 mdp4_overlayproc_cfg_wb_panel(struct mdp4_overlay_pipe *pipe,
+					char *overlay_base, uint32 curr)
+{
+	int off, bpp;
+	uint32 flag;
+	bool is_rgb = false;
+	struct mdp_mixer_cfg *mixer_cfg;
+
+	off = 0;
+	mixer_cfg = &ctrl->mdp_mixer_cfg[MDP4_MIXER2];
+
+	switch (mixer_cfg->writeback_format) {
+	case WB_FORMAT_RGB_888:
+		bpp = 3; /* RGB888 */
+		flag = 0x0;
+		is_rgb = true;
+		break;
+	case WB_FORMAT_RGB_565:
+		bpp = 2; /* RGB565 */
+		flag = 0x1;
+		is_rgb = true;
+		break;
+	case WB_FORMAT_xRGB_8888:
+		bpp = 4; /* xRGB8888 */
+		flag = 0x3;
+		is_rgb = true;
+		break;
+	case WB_FORMAT_ARGB_8888:
+		bpp = 4; /* ARGB8888 */
+		flag = 0x80000003;
+		is_rgb = true;
+		break;
+	case WB_FORMAT_ARGB_8888_INPUT_ALPHA:
+		pr_warn("currently not supported ARGB_8888_INPUT_ALPHA\n");
+	default:
+		bpp = 1; /* NV12 */
+		is_rgb = false;
+		break;
+	}
+
+	if (is_rgb == true) {
+		if (pipe->ov_cnt & 0x01)
+			off = pipe->src_height * pipe->src_width * bpp;
+
+		outpdw(overlay_base + 0x000c, pipe->ov_blt_addr + off);
+		/* overlay ouput is RGB888 */
+		outpdw(overlay_base + 0x0010, pipe->src_width * bpp);
+		outpdw(overlay_base + 0x001c, pipe->ov_blt_addr + off);
+		/* MDDI - BLT + on demand */
+		outpdw(overlay_base + 0x0004, 0x08);
+
+		curr = inpdw(overlay_base + 0x0014);
+		curr &= 0x4;
+
+		outpdw(overlay_base + 0x0014, curr | flag);
+	} else {
+		if (pipe->ov_cnt & 0x01)
+			off = pipe->src_height * pipe->src_width * bpp;
+
+		outpdw(overlay_base + 0x000c, pipe->ov_blt_addr + off);
+		/* overlay ouput is RGB888 */
+		outpdw(overlay_base + 0x0010, ((pipe->src_width << 16) |
+				pipe->src_width));
+		outpdw(overlay_base + 0x001c, pipe->ov_blt_addr + off);
+		off = pipe->src_height * pipe->src_width;
+		/* align chroma to 2k address */
+		off = (off + 2047) & ~2047;
+		/* UV plane adress */
+		outpdw(overlay_base + 0x0020, pipe->ov_blt_addr + off);
+		/* MDDI - BLT + on demand */
+		outpdw(overlay_base + 0x0004, 0x08);
+		/* pseudo planar + writeback */
+		curr = inpdw(overlay_base + 0x0014);
+		curr &= 0x4;
+		outpdw(overlay_base + 0x0014, curr | 0x012);
+		/* rgb->yuv */
+		outpdw(overlay_base + 0x0200, 0x05);
+	}
+	return curr;
+}
+
 /*
  * mdp4_overlayproc_cfg: only be called from base layer
  */
@@ -1495,34 +1616,8 @@ void mdp4_overlayproc_cfg(struct mdp4_overlay_pipe *pipe)
 #endif
 		} else if (pipe->mixer_num == MDP4_MIXER2) {
 			if (ctrl->panel_mode & MDP4_PANEL_WRITEBACK) {
-				off = 0;
-				bpp = 1;
-				if (pipe->ov_cnt & 0x01)
-					off = pipe->src_height *
-							pipe->src_width * bpp;
-
-				outpdw(overlay_base + 0x000c,
-						pipe->ov_blt_addr + off);
-				/* overlay ouput is RGB888 */
-				outpdw(overlay_base + 0x0010,
-					((pipe->src_width << 16) |
-					 pipe->src_width));
-				outpdw(overlay_base + 0x001c,
-						pipe->ov_blt_addr + off);
-				off = pipe->src_height * pipe->src_width;
-				/* align chroma to 2k address */
-				off = (off + 2047) & ~2047;
-				/* UV plane adress */
-				outpdw(overlay_base + 0x0020,
-						pipe->ov_blt_addr + off);
-				/* MDDI - BLT + on demand */
-				outpdw(overlay_base + 0x0004, 0x08);
-				/* pseudo planar + writeback */
-				curr = inpdw(overlay_base + 0x0014);
-				curr &= 0x4;
-				outpdw(overlay_base + 0x0014, curr | 0x012);
-				/* rgb->yuv */
-				outpdw(overlay_base + 0x0200, 0x05);
+				curr = mdp4_overlayproc_cfg_wb_panel(pipe,
+							overlay_base, curr);
 			}
 		}
 	} else {
@@ -3033,9 +3128,6 @@ static int get_img(struct msmfb_data *img, struct fb_info *info,
 {
 	struct file *file;
 	int put_needed, ret = 0, fb_num;
-#ifdef CONFIG_ANDROID_PMEM
-	unsigned long vstart;
-#endif
 	*p_need = 0;
 
 	if (img->flags & MDP_BLIT_SRC_GEM) {
@@ -3069,13 +3161,6 @@ static int get_img(struct msmfb_data *img, struct fb_info *info,
 #ifdef CONFIG_MSM_MULTIMEDIA_USE_ION
 	return mdp4_overlay_iommu_map_buf(img->memory_id, pipe, plane,
 		start, len, srcp_ihdl);
-#endif
-#ifdef CONFIG_ANDROID_PMEM
-	if (!get_pmem_file(img->memory_id, start, &vstart,
-					    len, srcp_file))
-		return 0;
-	else
-		return -EINVAL;
 #endif
 }
 
@@ -3188,10 +3273,10 @@ int mdp4_overlay_set(struct fb_info *info, struct mdp_overlay *req)
 		pr_debug("pipe->flags 0x%x\n", pipe->flags);
 		if (pipe->flags & MDP_SECURE_OVERLAY_SESSION) {
 			mfd->mem_hid &= ~BIT(ION_IOMMU_HEAP_ID);
-			mfd->mem_hid |= ION_SECURE;
+			mfd->mem_hid |= ION_FLAG_SECURE;
 		} else {
 			mfd->mem_hid |= BIT(ION_IOMMU_HEAP_ID);
-			mfd->mem_hid &= ~ION_SECURE;
+			mfd->mem_hid &= ~ION_FLAG_SECURE;
 		}
 	}
 
@@ -3606,6 +3691,8 @@ int mdp4_overlay_commit(struct fb_info *info)
 
 	mdp4_overlay_mdp_perf_upd(mfd, 1);
 
+	msm_fb_wait_for_fence(mfd);
+
 	switch (mfd->panel.type) {
 	case MIPI_CMD_PANEL:
 		mdp4_dsi_cmd_pipe_commit(0, 1);
@@ -3627,6 +3714,7 @@ int mdp4_overlay_commit(struct fb_info *info)
 		ret = -EINVAL;
 		break;
 	}
+	msm_fb_signal_timeline(mfd);
 
 	mdp4_overlay_mdp_perf_upd(mfd, 0);
 
@@ -3845,6 +3933,42 @@ done:
 	mutex_unlock(&mfd->dma->ov_mutex);
 	return err;
 }
+
+int mdp4_update_writeback_format(struct msm_fb_data_type *mfd,
+				struct mdp_mixer_cfg *mdp_mixer_cfg)
+{
+	int ret = 0;
+	u32 mixer_num;
+	struct mdp_mixer_cfg *mixer;
+
+	mixer_num = mdp4_get_mixer_num(mfd->panel_info.type);
+	if (!ctrl) {
+		pr_warn("mdp4_overlay_ctrl is NULL\n");
+		return -EPERM;
+	}
+	mixer = &ctrl->mdp_mixer_cfg[mixer_num];
+
+	switch (mdp_mixer_cfg->writeback_format) {
+	case WB_FORMAT_RGB_888:
+	case WB_FORMAT_RGB_565:
+	case WB_FORMAT_NV12:
+	case WB_FORMAT_xRGB_8888:
+	case WB_FORMAT_ARGB_8888:
+		mixer->writeback_format = mdp_mixer_cfg->writeback_format;
+		break;
+	case WB_FORMAT_ARGB_8888_INPUT_ALPHA:
+		mixer->writeback_format = mdp_mixer_cfg->writeback_format;
+		mixer->alpha = mdp_mixer_cfg->alpha;
+		break;
+	default:
+		mixer->writeback_format = WB_FORMAT_NV12;
+		pr_warn("Unsupported format request, setting to NV12\n");
+		ret = -EINVAL;
+		break;
+	}
+	return ret;
+}
+
 int mdp4_update_base_blend(struct msm_fb_data_type *mfd,
 			struct mdp_blend_cfg *mdp_blend_cfg)
 {

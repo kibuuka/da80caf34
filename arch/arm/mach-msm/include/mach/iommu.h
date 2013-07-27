@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -94,6 +94,11 @@ struct msm_iommu_bfb_settings {
  * @bfb_settings: Optional BFB performance tuning parameters
  * @dev:	Struct device this hardware instance is tied to
  * @list:	List head to link all iommus together
+ * @clk_reg_virt: Optional clock register virtual address.
+ * @halt_enabled: Set to 1 if IOMMU halt is supported in the IOMMU, 0 otherwise.
+ * @asid:         List of ASID and their usage count (index is ASID value).
+ * @ctx_attach_count: Count of how many context are attached.
+ * @bus_client  : Bus client needed to vote for bus bandwidth.
  *
  * A msm_iommu_drvdata holds the global driver data about a single piece
  * of an IOMMU hardware instance.
@@ -108,14 +113,47 @@ struct msm_iommu_drvdata {
 	struct clk *aclk;
 	const char *name;
 	struct regulator *gdsc;
+	struct regulator *alt_gdsc;
 	struct msm_iommu_bfb_settings *bfb_settings;
 	int sec_id;
 	struct device *dev;
 	struct list_head list;
+	void __iomem *clk_reg_virt;
+	int halt_enabled;
+	int *asid;
+	unsigned int ctx_attach_count;
+	unsigned int bus_client;
+};
+
+/**
+ * struct iommu_access_ops - Callbacks for accessing IOMMU
+ * @iommu_power_on:     Turn on power to unit
+ * @iommu_power_off:    Turn off power to unit
+ * @iommu_bus_vote:     Vote for bus bandwidth
+ * @iommu_clk_on:       Turn on clks to unit
+ * @iommu_clk_off:      Turn off clks to unit
+ * @iommu_lock_initialize: Initialize the remote lock
+ * @iommu_lock_acquire: Acquire any locks needed
+ * @iommu_lock_release: Release locks needed
+ */
+struct iommu_access_ops {
+	int (*iommu_power_on)(struct msm_iommu_drvdata *);
+	void (*iommu_power_off)(struct msm_iommu_drvdata *);
+	int (*iommu_bus_vote)(struct msm_iommu_drvdata *drvdata,
+			      unsigned int vote);
+	int (*iommu_clk_on)(struct msm_iommu_drvdata *);
+	void (*iommu_clk_off)(struct msm_iommu_drvdata *);
+	void * (*iommu_lock_initialize)(void);
+	void (*iommu_lock_acquire)(void);
+	void (*iommu_lock_release)(void);
 };
 
 void msm_iommu_add_drv(struct msm_iommu_drvdata *drv);
 void msm_iommu_remove_drv(struct msm_iommu_drvdata *drv);
+void program_iommu_bfb_settings(void __iomem *base,
+			const struct msm_iommu_bfb_settings *bfb_settings);
+void iommu_halt(const struct msm_iommu_drvdata *iommu_drvdata);
+void iommu_resume(const struct msm_iommu_drvdata *iommu_drvdata);
 
 /**
  * struct msm_iommu_ctx_drvdata - an IOMMU context bank instance
@@ -148,6 +186,22 @@ struct msm_iommu_ctx_drvdata {
 	int attach_count;
 };
 
+struct msm_iommu_context_regs {
+	uint32_t far;
+	uint32_t par;
+	uint32_t fsr;
+	uint32_t fsynr0;
+	uint32_t fsynr1;
+	uint32_t ttbr0;
+	uint32_t ttbr1;
+	uint32_t sctlr;
+	uint32_t actlr;
+	uint32_t prrr;
+	uint32_t nmrr;
+};
+
+void print_ctx_regs(struct msm_iommu_context_regs *regs);
+
 /*
  * Interrupt handler for the IOMMU context fault interrupt. Hooking the
  * interrupt is not supported in the API yet, but this will print an error
@@ -155,6 +209,7 @@ struct msm_iommu_ctx_drvdata {
  */
 irqreturn_t msm_iommu_fault_handler(int irq, void *dev_id);
 irqreturn_t msm_iommu_fault_handler_v2(int irq, void *dev_id);
+irqreturn_t msm_iommu_secure_fault_handler_v2(int irq, void *dev_id);
 
 enum {
 	PROC_APPS,
@@ -228,20 +283,21 @@ static inline struct device *msm_iommu_get_ctx(const char *ctx_name)
  * This should only be called on IOMMUs for which kernel programming
  * of global registers is not possible
  */
+void msm_iommu_sec_set_access_ops(struct iommu_access_ops *access_ops);
 int msm_iommu_sec_program_iommu(int sec_id);
 
-static inline int msm_soc_version_supports_iommu_v1(void)
+static inline int msm_soc_version_supports_iommu_v0(void)
 {
 #ifdef CONFIG_OF
 	struct device_node *node;
 
-	node = of_find_compatible_node(NULL, NULL, "qcom,msm-smmu-v2");
+	node = of_find_compatible_node(NULL, NULL, "qcom,msm-smmu-v1");
 	if (node) {
 		of_node_put(node);
 		return 0;
 	}
 
-	node = of_find_compatible_node(NULL, NULL, "qcom,msm-smmu-v1");
+	node = of_find_compatible_node(NULL, NULL, "qcom,msm-smmu-v0");
 	if (node) {
 		of_node_put(node);
 		return 1;

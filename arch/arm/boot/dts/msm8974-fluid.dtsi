@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -11,18 +11,17 @@
  */
 
 /include/ "dsi-panel-toshiba-720p-video.dtsi"
-/include/ "msm8974-camera-sensor.dtsi"
+/include/ "msm8974-camera-sensor-fluid.dtsi"
 /include/ "msm8974-leds.dtsi"
 
-/ {
+&soc {
 	serial@f991e000 {
 		status = "ok";
 	};
 
-	qcom,mdss_dsi@fd922800 {
-		qcom,mdss_dsi_toshiba_720p_video {
-			status = "ok";
-		};
+	qcom,mdss_dsi_toshiba_720p_video {
+		status = "ok";
+		qcom,cont-splash-enabled;
 	};
 
 	qcom,hdmi_tx@fd922100 {
@@ -42,6 +41,7 @@
 			atmel,panel-coords = <0  0 760 1424>;
 			atmel,display-coords = <0 0 720 1280>;
 			atmel,i2c-pull-up;
+			atmel,no-force-update;
 			atmel,cfg_1 {
 				atmel,family-id = <0x82>;
 				atmel,variant-id = <0x19>;
@@ -120,6 +120,7 @@
 			avcc_12-supply = <&pm8941_l2>;
 			smps3a-supply = <&pm8941_s3>;
 			vdda-supply = <&pm8941_l12>;
+			qcom,hdmi-tx-map = <&mdss_hdmi_tx>;
 		};
 
 		isa1200@48 {
@@ -142,6 +143,16 @@
 				regulator-max-microamp = <9360>;
 			};
 		};
+	};
+
+	gen-vkeys {
+		compatible = "qcom,gen-vkeys";
+		label = "atmel_mxt_ts";
+		qcom,disp-maxx = <720>;
+		qcom,disp-maxy = <1280>;
+		qcom,panel-maxx = <760>;
+		qcom,panel-maxy = <1424>;
+		qcom,key-codes = <158 139 102 217>;
 	};
 
 	gpio_keys {
@@ -191,7 +202,51 @@
 
 	sound {
 		qcom,model = "msm8974-taiko-fluid-snd-card";
+		qcom,audio-routing =
+			"RX_BIAS", "MCLK",
+			"LDO_H", "MCLK",
+			"AMIC1", "MIC BIAS1 Internal1",
+			"MIC BIAS1 Internal1", "Handset Mic",
+			"AMIC2", "MIC BIAS2 External",
+			"MIC BIAS2 External", "Headset Mic",
+			"AMIC3", "MIC BIAS2 External",
+			"MIC BIAS2 External", "ANCRight Headset Mic",
+			"AMIC4", "MIC BIAS2 External",
+			"MIC BIAS2 External", "ANCLeft Headset Mic",
+			"DMIC1", "MIC BIAS1 External",
+			"MIC BIAS1 External", "Digital Mic1",
+			"DMIC2", "MIC BIAS1 External",
+			"MIC BIAS1 External", "Digital Mic2",
+			"DMIC3", "MIC BIAS3 External",
+			"MIC BIAS3 External", "Digital Mic3",
+			"DMIC4", "MIC BIAS3 External",
+			"MIC BIAS3 External", "Digital Mic4",
+			"DMIC5", "MIC BIAS4 External",
+			"MIC BIAS4 External", "Digital Mic5",
+			"DMIC6", "MIC BIAS4 External",
+			"MIC BIAS4 External", "Digital Mic6",
+			"Lineout_1 amp", "LINEOUT1",
+			"Lineout_3 amp", "LINEOUT3";
+
 		qcom,hdmi-audio-rx;
+		qcom,ext-ult-lo-amp-gpio = <&pm8941_gpios 6 0>;
+		qcom,cdc-micbias2-headset-only;
+	};
+};
+
+&slim_msm {
+	taiko_codec {
+		qcom,cdc-micbias1-ext-cap;
+		qcom,cdc-micbias2-ext-cap;
+		qcom,cdc-micbias3-ext-cap;
+		qcom,cdc-micbias4-ext-cap;
+
+		/* If boot isn't available, vph_pwr_vreg can be used instead */
+		cdc-vdd-spkdrv-supply = <&pm8941_boost>;
+		qcom,cdc-vdd-spkdrv-voltage = <5000000 5000000>;
+		qcom,cdc-vdd-spkdrv-current = <1250000>;
+
+		qcom,cdc-on-demand-supplies = "cdc-vdd-spkdrv";
 	};
 };
 
@@ -204,8 +259,8 @@
 				linux,name = "wled:backlight";
 				linux,default-trigger = "bkl-trigger";
 				qcom,cs-out-en;
-				qcom,op-fdbck;
-				qcom,default-state = "off";
+				qcom,op-fdbck = <1>;
+				qcom,default-state = "on";
 				qcom,max-current = <25>;
 				qcom,ctrl-delay-us = <0>;
 				qcom,boost-curr-lim = <3>;
@@ -256,7 +311,7 @@
 };
 
 &sdcc1 {
-	qcom,bus-width = <4>;
+	status = "disabled";
 };
 
 &sdcc2 {
@@ -270,38 +325,112 @@
 			2 &msmgpio 62 0x3>;
 	interrupt-names = "core_irq", "bam_irq", "status_irq";
 	cd-gpios = <&msmgpio 62 0x1>;
+	status = "disabled";
+};
+
+&sdhc_1 {
+	vdd-supply = <&pm8941_l20>;
+	vdd-io-supply = <&pm8941_s3>;
+
+	qcom,vdd-always-on;
+	qcom,vdd-lpm-sup;
+	qcom,vdd-voltage-level = <2950000 2950000>;
+	qcom,vdd-current-level = <800 500000>;
+
+	qcom,vdd-io-always-on;
+	qcom,vdd-io-voltage-level = <1800000 1800000>;
+	qcom,vdd-io-current-level = <250 154000>;
+
+	qcom,pad-pull-on = <0x0 0x3 0x3>; /* no-pull, pull-up, pull-up */
+	qcom,pad-pull-off = <0x0 0x3 0x3>; /* no-pull, pull-up, pull-up */
+	qcom,pad-drv-on = <0x4 0x4 0x4>; /* 10mA, 10mA, 10mA */
+	qcom,pad-drv-off = <0x0 0x0 0x0>; /* 2mA, 2mA, 2mA */
+
+	qcom,nonremovable;
+	status = "ok";
+};
+
+&sdhc_2 {
+	#address-cells = <0>;
+	interrupt-parent = <&sdhc_2>;
+	interrupts = <0 1 2>;
+	#interrupt-cells = <1>;
+	interrupt-map-mask = <0xffffffff>;
+	interrupt-map = <0 &intc 0 125 0
+			1 &intc 0 221 0
+			2 &msmgpio 62 0x3>;
+	interrupt-names = "hc_irq", "pwr_irq", "status_irq";
+	cd-gpios = <&msmgpio 62 0x1>;
+
+	vdd-supply = <&pm8941_l21>;
+	vdd-io-supply = <&pm8941_l13>;
+
+	qcom,vdd-voltage-level = <2950000 2950000>;
+	qcom,vdd-current-level = <9000 800000>;
+
+	qcom,vdd-io-voltage-level = <1800000 2950000>;
+	qcom,vdd-io-current-level = <6 22000>;
+
+	qcom,pad-pull-on = <0x0 0x3 0x3>; /* no-pull, pull-up, pull-up */
+	qcom,pad-pull-off = <0x0 0x3 0x3>; /* no-pull, pull-up, pull-up */
+	qcom,pad-drv-on = <0x4 0x4 0x4>; /* 10mA, 10mA, 10mA */
+	qcom,pad-drv-off = <0x0 0x0 0x0>; /* 2mA, 2mA, 2mA */
+	status = "ok";
+};
+
+/* Drive strength recommendations for clock line from hardware team is 10 mA.
+ * But since the driver has been been using the below values from the start
+ * without any problems, continue to use those.
+ */
+&sdcc1 {
+	qcom,pad-drv-on = <0x7 0x4 0x4>; /* 16mA, 10mA, 10mA */
+};
+
+&sdcc2 {
+	qcom,pad-drv-on = <0x7 0x4 0x4>; /* 16mA, 10mA, 10mA */
+};
+
+&sdhc_1 {
+	qcom,pad-drv-on = <0x7 0x4 0x4>; /* 16mA, 10mA, 10mA */
+};
+
+&sdhc_2 {
+	qcom,pad-drv-on = <0x7 0x4 0x4>; /* 16mA, 10mA, 10mA */
 };
 
 &usb3 {
 	qcom,otg-capability;
 };
 
+&pm8941_bms {
+	status = "ok";
+};
+
 &pm8941_chg {
 	status = "ok";
+	qcom,charging-disabled;
 
-	qcom,chg-charging-disabled;
-
-	qcom,chg-chgr@1000 {
+	qcom,chgr@1000 {
 		status = "ok";
 	};
 
-	qcom,chg-buck@1100 {
+	qcom,buck@1100 {
 		status = "ok";
 	};
 
-	qcom,chg-bat-if@1200 {
+	qcom,bat-if@1200 {
 		status = "ok";
 	};
 
-	qcom,chg-usb-chgpth@1300 {
+	qcom,usb-chgpth@1300 {
 		status = "ok";
 	};
 
-	qcom,chg-dc-chgpth@1400 {
+	qcom,dc-chgpth@1400 {
 		status = "ok";
 	};
 
-	qcom,chg-boost@1500 {
+	qcom,boost@1500 {
 		status = "ok";
 	};
 
@@ -362,7 +491,7 @@
 		qcom,pull = <5>;		/* QPNP_PIN_PULL_NO */
 		qcom,vin-sel = <2>;		/* QPNP_PIN_VIN2 */
 		qcom,out-strength = <2>;	/* QPNP_PIN_OUT_STRENGTH_MED */
-		qcom,src-select = <0>;		/* QPNP_PIN_SEL_FUNC_CONSTANT */
+		qcom,src-sel = <0>;		/* QPNP_PIN_SEL_FUNC_CONSTANT */
 		qcom,master-en = <1>;
 	};
 
@@ -377,7 +506,7 @@
 		qcom,output-type = <0>;
 		qcom,pull = <5>;
 		qcom,vin-sel = <2>;
-		qcom,out-strength = <3>;
+		qcom,out-strength = <1>;
 		qcom,src-sel = <2>;
 		qcom,master-en = <1>;
 	};
@@ -466,6 +595,7 @@
 &pm8941_mpps {
 
 	mpp@a000 { /* MPP 1 */
+		status = "disabled";
 	};
 
 	mpp@a100 { /* MPP 2 */
@@ -478,12 +608,6 @@
 	};
 
 	mpp@a400 { /* MPP 5 */
-		/* SPI_ETH config */
-		qcom,mode = <1>; /* DIG_OUT */
-		qcom,output-type = <0>; /* CMOS */
-		qcom,vin-sel = <2>; /* PM8941_S3 1.8V > 1.6V */
-		qcom,src-sel = <0>; /* CONSTANT */
-		qcom,master-en = <1>; /* ENABLE MPP */
 	};
 
 	mpp@a500 { /* MPP 6 */
@@ -501,9 +625,9 @@
 	mpp@a700 { /* MPP 8 */
 		qcom,mode = <1>; /* DIG_OUT */
 		qcom,output-type = <0>; /* CMOS */
-		qcom,pull-up = <0>;
+		qcom,pull = <0>;
 		qcom,vin-sel = <2>; /* PM8941_S3 1.8V > 1.6V */
-		qcom,src-select = <0>; /* CONSTANT */
+		qcom,src-sel = <0>; /* CONSTANT */
 		qcom,master-en = <1>; /* ENABLE MPP */
 	};
 };

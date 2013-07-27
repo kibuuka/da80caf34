@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -49,6 +49,9 @@ static void snddev_hsed_config_restore_setting(void);
 
 #define SNDDEV_GPIO_MIC2_ANCR_SEL 294
 #define SNDDEV_GPIO_MIC1_ANCL_SEL 295
+//Nick add for BSP3130 20110710
+#define GPIO_SPK_CLASSD_AMP_EN  68
+//Nick add end 20110710
 #define SNDDEV_GPIO_HS_MIC4_SEL 296
 
 #define DSP_RAM_BASE_8x60 0x46700000
@@ -257,6 +260,36 @@ static void msm_snddev_disable_dmic_power(void)
 	}
 }
 
+
+//Nick add for DA80_3134 20110914
+static int cci_speaker_amp_enable(void)
+{
+	int nRet ;
+	pr_info("%s\n", __func__);
+
+		nRet = gpio_direction_output(GPIO_SPK_CLASSD_AMP_EN, 1);
+		if ( nRet == 0 )
+			printk("%s gpio_direction_output success\n", __func__);
+		else
+			pr_err("%s gpio_direction_output fail\n", __func__);
+	return nRet;
+}
+
+static int cci_speaker_amp_disable(void)
+{
+      int nRet ;
+	pr_info("%s\n", __func__);
+
+             nRet = gpio_direction_output(GPIO_SPK_CLASSD_AMP_EN, 0);
+             if ( nRet == 0 )
+                   printk("%s gpio_direction_output success\n", __func__);
+             else
+                   pr_err("%s gpio_direction_output fail\n", __func__);
+      return nRet;
+}
+//Nick add end 20110914
+
+
 #define PM8901_MPP_3 (2) /* PM8901 MPP starts from 0 */
 
 static int config_class_d0_gpio(int enable)
@@ -329,6 +362,11 @@ static atomic_t pamp_ref_cnt;
 static int msm_snddev_poweramp_on(void)
 {
 	int rc;
+//Nick add for DA80_3134 20110914
+	rc=cci_speaker_amp_enable();		// CCI
+	pr_debug("%s: enable stereo spkr amp %d\n", __func__,rc);
+		return 0 ;
+//Nick add end 20110914
 
 	if (atomic_inc_return(&pamp_ref_cnt) > 1)
 		return 0;
@@ -350,6 +388,13 @@ config_gpio_fail:
 
 static void msm_snddev_poweramp_off(void)
 {
+//Nick add for DA80_3134 20110914
+    int rc;
+    msleep(30);
+    rc=cci_speaker_amp_disable();		// CCI
+    pr_debug("%s: disable stereo spkr amp %d\n", __func__,rc);	
+return ;
+//Nick add end 20110914
 	if (atomic_dec_return(&pamp_ref_cnt) == 0) {
 		pr_debug("%s: disable stereo spkr amp\n", __func__);
 		config_class_d0_gpio(0);
@@ -668,7 +713,15 @@ static struct platform_device msm_iearpiece_device = {
 };
 
 static struct adie_codec_action_unit imic_48KHz_osr256_actions[] =
+//Nick add for DA80_3134 20110914
+#if defined(ORG_VER)
+//Nick add end 20110914
 	AMIC_PRI_MONO_OSR_256;
+//Nick add for DA80_3134 20110914
+#else
+#endif
+DMIC1_PRI_MONO_OSR_256;
+//Nick add end 20110914
 
 static struct adie_codec_hwsetting_entry imic_settings[] = {
 	{
@@ -692,8 +745,17 @@ static struct snddev_icodec_data snddev_imic_data = {
 	.profile = &imic_profile,
 	.channel_mode = 1,
 	.default_sample_rate = 48000,
+        //Nick add for DA80_3134 20110914
+        #if defined(ORG_VER)
+        //Nick add end 20110914
 	.pamp_on = msm_snddev_enable_amic_power,
 	.pamp_off = msm_snddev_disable_amic_power,
+        //Nick add for DA80_3134 20110914
+        #else
+        #endif
+	.pamp_on = msm_snddev_enable_dmic_power ,
+	.pamp_off = msm_snddev_disable_dmic_power,
+        //Nick add end 20110914
 };
 
 static struct platform_device msm_imic_device = {
@@ -823,7 +885,15 @@ static struct platform_device msm_ispkr_stereo_device = {
 };
 
 static struct adie_codec_action_unit idmic_mono_48KHz_osr256_actions[] =
+//Nick add for DA80_3134 20110914
+#if defined(ORG_VER)
+//Nick add end 20110914
 	DMIC1_PRI_MONO_OSR_256;
+//Nick add for DA80_3134 20110914
+#else
+#endif
+	DMIC2_PRI_MONO_OSR_256;
+//Nick add end 20110914
 
 static struct adie_codec_hwsetting_entry idmic_mono_settings[] = {
 	{
@@ -948,7 +1018,274 @@ static struct snddev_icodec_data snddev_dual_mic_spkr_endfire_data = {
 	.pamp_on = msm_snddev_enable_dmic_power,
 	.pamp_off = msm_snddev_disable_dmic_power,
 };
+//Nick add for DA80_3134 20110914
+static struct adie_codec_action_unit cci_fm_headset_rx_48KHz_osr256_actions[] =
+	CCI_FM_HEADSET_RX_48000_OSR_256;
+static struct adie_codec_hwsetting_entry cci_fm_headset_rx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_fm_headset_rx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_fm_headset_rx_48KHz_osr256_actions),
+	}
+};
+static struct adie_codec_dev_profile cci_fm_headset_rx_profile = {
+	.path_type = ADIE_CODEC_RX,
+	.settings = cci_fm_headset_rx_settings,
+	.setting_sz = ARRAY_SIZE(cci_fm_headset_rx_settings),
+};
+static struct snddev_icodec_data snddev_cci_fm_headset_rx_data = {
+	.capability = (SNDDEV_CAP_RX | SNDDEV_CAP_VOICE),
+	.name = "cci_fm_headset_rx",
+	.copp_id = 0,
+	.profile = &cci_fm_headset_rx_profile,
+	.channel_mode = 2,
+	.default_sample_rate = 48000,
+	.voltage_on = msm_snddev_voltage_on,
+	.voltage_off = msm_snddev_voltage_off,
+};
+static struct platform_device msm_cci_fm_headset_rx = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_fm_headset_rx_data },
+};
 
+//Nick add for BSP3130 20110710
+//cci fm speaker audio path 
+static struct adie_codec_action_unit cci_fm_speaker_rx_48KHz_osr256_actions[] =
+	CCI_FM_SPEAKER_RX_48000_OSR_256;
+static struct adie_codec_hwsetting_entry cci_fm_speaker_rx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_fm_speaker_rx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_fm_speaker_rx_48KHz_osr256_actions),
+	}
+};
+static struct adie_codec_dev_profile cci_fm_speaker_rx_profile = {
+	.path_type = ADIE_CODEC_RX,
+	.settings = cci_fm_speaker_rx_settings,
+	.setting_sz = ARRAY_SIZE(cci_fm_speaker_rx_settings),
+};
+static struct snddev_icodec_data snddev_cci_fm_speaker_rx_data = {
+	.capability = (SNDDEV_CAP_RX | SNDDEV_CAP_VOICE),
+	.name = "cci_fm_speaker_rx",
+	.copp_id = 0,
+	.profile = &cci_fm_speaker_rx_profile,
+	.channel_mode = 2,
+	.default_sample_rate = 48000,
+	.pamp_on = msm_snddev_poweramp_on,
+	.pamp_off = msm_snddev_poweramp_off,
+};
+static struct platform_device msm_cci_fm_speaker_rx = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_fm_speaker_rx_data },
+};
+//nick add end 20110710
+
+//Nick add for seperate audio path 20110823 
+static struct adie_codec_action_unit cci_recording_handset_tx_48KHz_osr256_actions[] =
+	CCI_RECORDING_HANDSET_TX_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_recording_handset_tx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_recording_handset_tx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_recording_handset_tx_48KHz_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_recording_handset_tx_profile = {
+	.path_type = ADIE_CODEC_TX,
+	.settings = cci_recording_handset_tx_settings,
+	.setting_sz = ARRAY_SIZE(cci_recording_handset_tx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_recording_handset_tx_data = {
+	.capability = (SNDDEV_CAP_TX | SNDDEV_CAP_VOICE),
+	.name = "recording_handset_tx",
+	.copp_id = PRIMARY_I2S_TX,
+	.profile = &cci_recording_handset_tx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+	.pamp_on = msm_snddev_enable_dmic_power,
+	.pamp_off = msm_snddev_disable_dmic_power,
+};
+
+static struct platform_device msm_cci_recording_handset_tx= {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_recording_handset_tx_data },
+};
+
+
+static struct adie_codec_action_unit cci_recording_headset_tx_osr256_actions[] =
+	CCI_RECORDING_HEADSET_TX_MONO_PRI_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_recording_headset_tx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_recording_headset_tx_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_recording_headset_tx_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_recording_headset_tx_profile = {
+	.path_type = ADIE_CODEC_TX,
+	.settings = cci_recording_headset_tx_settings,
+	.setting_sz = ARRAY_SIZE(cci_recording_headset_tx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_recording_headset_tx_data = {
+	.capability = (SNDDEV_CAP_TX | SNDDEV_CAP_VOICE),
+	.name = "recording_headset_tx",
+	.copp_id = PRIMARY_I2S_TX,
+	.profile = &cci_recording_headset_tx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+};
+
+static struct platform_device msm_cci_recording_headset_tx = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_recording_headset_tx_data },
+};
+
+static struct adie_codec_action_unit cci_media_mixed_fm_headset_rx_48KHz_osr256_actions[] =
+	CCI_MEDIA_MIXED_FM_HEADSET_RX_48000_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_media_mixed_fm_headset_rx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_media_mixed_fm_headset_rx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_media_mixed_fm_headset_rx_48KHz_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_media_mixed_fm_headset_rx_profile = {
+	.path_type = ADIE_CODEC_RX,
+	.settings = cci_media_mixed_fm_headset_rx_settings,
+	.setting_sz = ARRAY_SIZE(cci_media_mixed_fm_headset_rx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_media_mixed_fm_headset_rx_data = {
+	.capability = (SNDDEV_CAP_RX | SNDDEV_CAP_VOICE),
+	.name = "media_mixed_fm_headset_rx",
+	.copp_id = 0,
+	.profile = &cci_media_mixed_fm_headset_rx_profile,
+	.channel_mode = 2,
+	.default_sample_rate = 48000,
+	.voltage_on = msm_snddev_voltage_on,
+	.voltage_off = msm_snddev_voltage_off,
+};
+
+static struct platform_device msm_cci_media_mixed_fm_headset_rx = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_media_mixed_fm_headset_rx_data },
+};
+
+static struct adie_codec_action_unit cci_media_mixed_fm_headset_tx_osr256_actions[] =
+	CCI_MEDIA_MIXED_FM_HEADSET_TX_MONO_PRI_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_media_mixed_fm_headset_tx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_media_mixed_fm_headset_tx_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_media_mixed_fm_headset_tx_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_media_mixed_fm_headset_tx_profile = {
+	.path_type = ADIE_CODEC_TX,
+	.settings = cci_media_mixed_fm_headset_tx_settings,
+	.setting_sz = ARRAY_SIZE(cci_media_mixed_fm_headset_tx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_media_mixed_fm_headset_tx_data = {
+	.capability = (SNDDEV_CAP_TX | SNDDEV_CAP_VOICE),
+	.name = "media_mixed_fm_headset_tx",
+	.copp_id = PRIMARY_I2S_TX,
+	.profile = &cci_media_mixed_fm_headset_tx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+};
+
+static struct platform_device msm_cci_media_mixed_fm_headset_tx = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_media_mixed_fm_headset_tx_data },
+};
+
+static struct adie_codec_action_unit cci_media_mixed_fm_speaker_rx_48KHz_osr256_actions[] =
+	CCI_MEDIA_MIXED_FM_SPEAKER_RX_PRI_STEREO_48000_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_media_mixed_fm_speaker_rx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_media_mixed_fm_speaker_rx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_media_mixed_fm_speaker_rx_48KHz_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_media_mixed_fm_speaker_rx_profile = {
+	.path_type = ADIE_CODEC_RX,
+	.settings = cci_media_mixed_fm_speaker_rx_settings,
+	.setting_sz = ARRAY_SIZE(cci_media_mixed_fm_speaker_rx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_media_mixed_fm_speaker_rx_data = {
+	.capability = (SNDDEV_CAP_RX | SNDDEV_CAP_VOICE),
+	.name = "media_mixed_fm_speaker_rx",
+	.copp_id = 0,
+	.profile = &cci_media_mixed_fm_speaker_rx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+	.pamp_on = msm_snddev_poweramp_on,
+	.pamp_off = msm_snddev_poweramp_off,
+};
+
+static struct platform_device msm_cci_media_mixed_fm_speaker_rx = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_media_mixed_fm_speaker_rx_data },
+};
+
+static struct adie_codec_action_unit cci_media_mixed_fm_speaker_tx_48KHz_osr256_actions[] =
+	CCI_MEDIA_MIXED_FM_SPEKER_TX_PRI_MONO_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_media_mixed_fm_speaker_tx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_media_mixed_fm_speaker_tx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_media_mixed_fm_speaker_tx_48KHz_osr256_actions),
+	}
+};
+
+
+static struct adie_codec_dev_profile cci_media_mixed_fm_speaker_tx_profile = {
+	.path_type = ADIE_CODEC_TX,
+	.settings = cci_media_mixed_fm_speaker_tx_settings,
+	.setting_sz = ARRAY_SIZE(cci_media_mixed_fm_speaker_tx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_media_mixed_fm_speaker_tx_data = {
+	.capability = (SNDDEV_CAP_TX | SNDDEV_CAP_VOICE),
+	.name = "media_mixed_fm_speaker_tx",
+	.copp_id = PRIMARY_I2S_TX,
+	.profile = &cci_media_mixed_fm_speaker_tx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+	.pamp_on = msm_snddev_enable_dmic_power,
+	.pamp_off = msm_snddev_disable_dmic_power,
+};
+
+
+static struct platform_device msm_cci_media_mixed_fm_speaker_tx = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_media_mixed_fm_speaker_tx_data },
+};
+//Nick add end 20110914
 static struct platform_device msm_spkr_dual_mic_endfire_device = {
 	.name = "snddev_icodec",
 	.id = 15,
@@ -2460,7 +2797,272 @@ static struct adie_codec_hwsetting_entry
 		(ihs_stereo_rx_class_ab_legacy_48KHz_osr256_actions),
 	}
 };
+//Nick add for mMode=3 Network phone 20111021
+static struct adie_codec_action_unit cci_sip_handset_rx_48KHz_osr256_actions[] =
+	CCI_SIP_HANDSET_RX_MONO_8000_OSR_256;
+static struct adie_codec_hwsetting_entry cci_sip_handset_rx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_sip_handset_rx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_sip_handset_rx_48KHz_osr256_actions),
+	}
+};
 
+static struct adie_codec_dev_profile cci_sip_handset_rx_profile = {
+	.path_type = ADIE_CODEC_RX,
+	.settings = cci_sip_handset_rx_settings,
+	.setting_sz = ARRAY_SIZE(cci_sip_handset_rx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_sip_handset_rx_data = {
+	.capability = (SNDDEV_CAP_RX | SNDDEV_CAP_VOICE),
+	.name = "sip_handset_rx",
+	.copp_id = 0,
+	.profile = &cci_sip_handset_rx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+};
+
+static struct platform_device msm_cci_sip_handset_rx_device = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_sip_handset_rx_data },
+};
+static struct adie_codec_action_unit cci_sip_handset_tx_48KHz_osr256_actions[] =
+CCI_SIP_HANDSET_TX_MONO_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_sip_handset_tx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_sip_handset_tx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_sip_handset_tx_48KHz_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_sip_handset_tx_profile = {
+	.path_type = ADIE_CODEC_TX,
+	.settings = cci_sip_handset_tx_settings,
+	.setting_sz = ARRAY_SIZE(cci_sip_handset_tx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_sip_handset_tx_data = {
+	.capability = (SNDDEV_CAP_TX | SNDDEV_CAP_VOICE),
+	.name = "sip_handset_tx",
+	.copp_id = 1,
+	.profile = &cci_sip_handset_tx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+	.pamp_on = msm_snddev_enable_dmic_power ,
+	.pamp_off = msm_snddev_disable_dmic_power,
+};
+
+static struct platform_device msm_cci_sip_handset_tx_device = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_sip_handset_tx_data },
+};
+static struct adie_codec_action_unit cci_sip_headset_rx_48KHz_osr256_actions[] =
+	CCI_SIP_HEADSET_RX_AB_CPLS_48000_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_sip_headset_rx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_sip_headset_rx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_sip_headset_rx_48KHz_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_sip_headset_rx_profile = {
+	.path_type = ADIE_CODEC_RX,
+	.settings = cci_sip_headset_rx_settings,
+	.setting_sz = ARRAY_SIZE(cci_sip_headset_rx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_sip_headset_rx_data = {
+	.capability = (SNDDEV_CAP_RX | SNDDEV_CAP_VOICE),
+	.name = "sip_headset_rx",
+	.copp_id = 0,
+	.profile = &cci_sip_headset_rx_profile,
+	.channel_mode = 2,
+	.default_sample_rate = 48000,
+	.voltage_on = msm_snddev_voltage_on,
+	.voltage_off = msm_snddev_voltage_off,
+};
+
+static struct platform_device msm_cci_sip_headset_rx_device = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_sip_headset_rx_data },
+};
+static struct adie_codec_action_unit cci_sip_headset_tx_osr256_actions[] =
+	CCI_SIP_HEADSET_TX_MONO_PRI_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_sip_headset_tx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_sip_headset_tx_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_sip_headset_tx_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_sip_headset_tx_profile = {
+	.path_type = ADIE_CODEC_TX,
+	.settings = cci_sip_headset_tx_settings,
+	.setting_sz = ARRAY_SIZE(cci_sip_headset_tx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_sip_headset_tx_data = {
+	.capability = (SNDDEV_CAP_TX | SNDDEV_CAP_VOICE),
+	.name = "sip_headset_tx",
+	.copp_id = PRIMARY_I2S_TX,
+	.profile = &cci_sip_headset_tx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+};
+
+static struct platform_device msm_cci_sip_headset_tx_device = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_sip_headset_tx_data },
+};
+static struct adie_codec_action_unit cci_sip_speaker_rx_48KHz_osr256_actions[] =
+	CCI_SIP_SPEAKER_RX_STEREO_48000_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_sip_speaker_rx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_sip_speaker_rx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_sip_speaker_rx_48KHz_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_sip_speaker_rx_profile = {
+	.path_type = ADIE_CODEC_RX,
+	.settings = cci_sip_speaker_rx_settings,
+	.setting_sz = ARRAY_SIZE(cci_sip_speaker_rx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_sip_speaker_rx_data = {
+	.capability = (SNDDEV_CAP_RX | SNDDEV_CAP_VOICE),
+	.name = "sip_speaker_rx",
+	.copp_id = 0,
+	.profile = &cci_sip_speaker_rx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+	.pamp_on = msm_snddev_poweramp_on,
+	.pamp_off = msm_snddev_poweramp_off,
+};
+
+static struct platform_device msm_cci_sip_speaker_rx_device = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_sip_speaker_rx_data },
+};
+static struct adie_codec_action_unit cci_sip_speaker_tx_mono_48KHz_osr256_actions[] =
+	CCI_SIP_SPEAKER_MONO_OSR_256;
+
+
+static struct adie_codec_hwsetting_entry cci_sip_speaker_tx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_sip_speaker_tx_mono_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_sip_speaker_tx_mono_48KHz_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_sip_speaker_tx_profile = {
+	.path_type = ADIE_CODEC_TX,
+	.settings = cci_sip_speaker_tx_settings,
+	.setting_sz = ARRAY_SIZE(cci_sip_speaker_tx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_sip_speaker_tx_data = {
+	.capability = (SNDDEV_CAP_TX | SNDDEV_CAP_VOICE),
+	.name = "sip_speaker_tx",
+	.copp_id = PRIMARY_I2S_TX,
+	.profile = &cci_sip_speaker_tx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+	.pamp_on = msm_snddev_enable_dmic_power,
+	.pamp_off = msm_snddev_disable_dmic_power,
+};
+
+static struct platform_device msm_cci_sip_speaker_tx_device = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_sip_speaker_tx_data },
+};
+//Nick add end 20111021
+
+//Nick add for no mic headset audio path 20111228 BUDZILLA 1706
+static struct adie_codec_action_unit cci_no_mic_headset_imic_48KHz_osr256__actions[] =
+	CCI_NO_MIC_HEADSET_TX_DMIC1_PRI_MONO_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_no_mic_headset_tx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_no_mic_headset_imic_48KHz_osr256__actions,
+		.action_sz = ARRAY_SIZE(cci_no_mic_headset_imic_48KHz_osr256__actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_no_mic_headset_tx_profile = {
+	.path_type = ADIE_CODEC_TX,
+	.settings = cci_no_mic_headset_tx_settings,
+	.setting_sz = ARRAY_SIZE(cci_no_mic_headset_tx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_no_mic_headset_tx_data = {
+	.capability = (SNDDEV_CAP_TX | SNDDEV_CAP_VOICE),
+	.name = "no_mic_headset_tx",
+	.copp_id = 1,
+	.profile = &cci_no_mic_headset_tx_profile,
+	.channel_mode = 1,
+	.default_sample_rate = 48000,
+	.pamp_on = msm_snddev_enable_dmic_power,
+	.pamp_off = msm_snddev_disable_dmic_power,
+};
+
+static struct platform_device msm_cci_no_mic_headset_tx_device = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_no_mic_headset_tx_data },
+};
+
+static struct adie_codec_action_unit cci_no_mic_rx_48KHz_osr256_actions[] =
+	CCI_NO_MIC_HEADSET_RX_AB_CPLS_48000_OSR_256;
+
+static struct adie_codec_hwsetting_entry cci_no_mic_headset_rx_settings[] = {
+	{
+		.freq_plan = 48000,
+		.osr = 256,
+		.actions = cci_no_mic_rx_48KHz_osr256_actions,
+		.action_sz = ARRAY_SIZE(cci_no_mic_rx_48KHz_osr256_actions),
+	}
+};
+
+static struct adie_codec_dev_profile cci_no_mic_headset_rx_profile = {
+	.path_type = ADIE_CODEC_RX,
+	.settings = cci_no_mic_headset_rx_settings,
+	.setting_sz = ARRAY_SIZE(cci_no_mic_headset_rx_settings),
+};
+
+static struct snddev_icodec_data snddev_cci_no_mic_headset_rx_data = {
+	.capability = (SNDDEV_CAP_RX | SNDDEV_CAP_VOICE),
+	.name = "no_mic_headset_rx",
+	.copp_id = 0,
+	.profile = &cci_no_mic_headset_rx_profile,
+	.channel_mode = 2,
+	.default_sample_rate = 48000,
+	.voltage_on = msm_snddev_voltage_on,
+	.voltage_off = msm_snddev_voltage_off,
+};
+
+static struct platform_device msm_cci_no_mic_headset_rx_device = {
+	.name = "snddev_icodec",
+	.dev = { .platform_data = &snddev_cci_no_mic_headset_rx_data },
+};
+//Nick add end 20111228
 static void snddev_hsed_config_modify_setting(int type)
 {
 	struct platform_device *device;
@@ -2576,7 +3178,13 @@ static struct platform_device *snd_devices_ffa[] __initdata = {
 
 static struct platform_device *snd_devices_surf[] __initdata = {
 	&msm_iearpiece_device,
+//Nick add for modified voice handset audio path 20110927
+#if defined(ORG_VER)
 	&msm_imic_device,
+#else
+	&msm_hs_dual_mic_endfire_device,
+#endif
+//Nick add end 20110927
 	&msm_ispkr_stereo_device,
 	&msm_snddev_hdmi_stereo_rx_device,
 	&msm_headset_mic_device,
@@ -2592,8 +3200,37 @@ static struct platform_device *snd_devices_surf[] __initdata = {
 	&msm_auxpga_lp_hs_device,
 	&msm_auxpga_lp_lo_device,
 	&msm_linein_pri_device,
+        //Nick add for DA80_3134 20110914
+	#if defined(ORG_VER)
+        //Nick add end 20110914
 	&msm_icodec_gpio_device,
+        //Nick add for DA80_3134 20110914
+	#else
+	#endif
+        //Nick add end 20110914
 	&msm_snddev_hdmi_non_linear_pcm_rx_device,
+        //Nick add for DA80_3134 20110914
+	&msm_cci_fm_headset_rx,
+	&msm_cci_fm_speaker_rx,
+	&msm_cci_recording_handset_tx,
+	&msm_cci_recording_headset_tx,
+	&msm_cci_media_mixed_fm_headset_rx,
+	&msm_cci_media_mixed_fm_headset_tx,
+	&msm_cci_media_mixed_fm_speaker_rx,
+	&msm_cci_media_mixed_fm_speaker_tx,
+	//Nick add end 20110914
+	//Nick add for mMode=3 Network phone 20111021
+	&msm_cci_sip_handset_rx_device,
+	&msm_cci_sip_handset_tx_device,
+	&msm_cci_sip_headset_rx_device,
+	&msm_cci_sip_headset_tx_device,
+	&msm_cci_sip_speaker_rx_device,
+	&msm_cci_sip_speaker_tx_device,
+	//Nick add end 20111021
+//Nick add for no mic headset audio path 20111228 BUDZILLA 1706
+	&msm_cci_no_mic_headset_rx_device,
+	&msm_cci_no_mic_headset_tx_device,
+//Nick add end 20111228
 };
 
 static struct platform_device *snd_devices_fluid[] __initdata = {
@@ -2670,6 +3307,9 @@ void __init msm_snddev_init(void)
 	int i;
 	int dev_id;
 
+        //Nick add for DA80_3134 20110914
+        int nRet;
+        //Nick add end 20110914
 	atomic_set(&pamp_ref_cnt, 0);
 	atomic_set(&preg_ref_cnt, 0);
 
@@ -2709,6 +3349,22 @@ void __init msm_snddev_init(void)
 		platform_add_devices(snd_devices_ftm,
 				ARRAY_SIZE(snd_devices_ftm));
 	}
+//Nick add for DA80_3134 20110914
+    if ( gpio_is_valid(GPIO_SPK_CLASSD_AMP_EN) )
+	{
+		printk("gpio = %d valid = %d\n",GPIO_SPK_CLASSD_AMP_EN,gpio_get_value(GPIO_SPK_CLASSD_AMP_EN));
+		nRet = gpio_request(GPIO_SPK_CLASSD_AMP_EN, "CCI_SPEAKER_AMP_EN");
+		if ( nRet == 0 )
+			pr_err("%s gpio %d request success\n", __func__,GPIO_SPK_CLASSD_AMP_EN);
+		else
+			pr_err("%s gpio %d request fail\n", __func__,GPIO_SPK_CLASSD_AMP_EN);
+
+    }
+	else
+	{
+		printk("gpio = %d not valid\n",GPIO_SPK_CLASSD_AMP_EN);
+	}
+//Nick add end 20110914
 
 #ifdef CONFIG_DEBUG_FS
 	debugfs_hsed_config = debugfs_create_file("msm_hsed_config",

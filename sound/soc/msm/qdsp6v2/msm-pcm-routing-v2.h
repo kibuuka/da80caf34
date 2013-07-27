@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,6 +26,8 @@
 #define LPASS_BE_AFE_PCM_TX "RT_PROXY_DAI_002_TX"
 #define LPASS_BE_AUXPCM_RX "AUX_PCM_RX"
 #define LPASS_BE_AUXPCM_TX "AUX_PCM_TX"
+#define LPASS_BE_SEC_AUXPCM_RX "SEC_AUX_PCM_RX"
+#define LPASS_BE_SEC_AUXPCM_TX "SEC_AUX_PCM_TX"
 #define LPASS_BE_VOICE_PLAYBACK_TX "VOICE_PLAYBACK_TX"
 #define LPASS_BE_INCALL_RECORD_RX "INCALL_RECORD_TX"
 #define LPASS_BE_INCALL_RECORD_TX "INCALL_RECORD_RX"
@@ -37,6 +39,11 @@
 #define LPASS_BE_QUAT_MI2S_TX "QUAT_MI2S_TX"
 #define LPASS_BE_SEC_MI2S_RX "SEC_MI2S_RX"
 #define LPASS_BE_SEC_MI2S_TX "SEC_MI2S_TX"
+#define LPASS_BE_PRI_MI2S_RX "PRI_MI2S_RX"
+#define LPASS_BE_PRI_MI2S_TX "PRI_MI2S_TX"
+#define LPASS_BE_TERT_MI2S_RX "TERTIARY_MI2S_RX"
+#define LPASS_BE_TERT_MI2S_TX "TERTIARY_MI2S_TX"
+#define LPASS_BE_AUDIO_I2S_RX "AUDIO_I2S_RX"
 #define LPASS_BE_STUB_RX "STUB_RX"
 #define LPASS_BE_STUB_TX "STUB_TX"
 #define LPASS_BE_SLIMBUS_1_RX "SLIMBUS_1_RX"
@@ -46,6 +53,7 @@
 #define LPASS_BE_SLIMBUS_3_TX "SLIMBUS_3_TX"
 #define LPASS_BE_SLIMBUS_4_RX "SLIMBUS_4_RX"
 #define LPASS_BE_SLIMBUS_4_TX "SLIMBUS_4_TX"
+#define LPASS_BE_SLIMBUS_5_TX "SLIMBUS_5_TX"
 
 /* For multimedia front-ends, asm session is allocated dynamically.
  * Hence, asm session/multimedia front-end mapping has to be maintained.
@@ -58,17 +66,24 @@ enum {
 	MSM_FRONTEND_DAI_MULTIMEDIA2,
 	MSM_FRONTEND_DAI_MULTIMEDIA3,
 	MSM_FRONTEND_DAI_MULTIMEDIA4,
+	MSM_FRONTEND_DAI_MULTIMEDIA5,
+	MSM_FRONTEND_DAI_MULTIMEDIA6,
+	MSM_FRONTEND_DAI_MULTIMEDIA7,
+	MSM_FRONTEND_DAI_MULTIMEDIA8,
 	MSM_FRONTEND_DAI_CS_VOICE,
 	MSM_FRONTEND_DAI_VOIP,
 	MSM_FRONTEND_DAI_AFE_RX,
 	MSM_FRONTEND_DAI_AFE_TX,
 	MSM_FRONTEND_DAI_VOICE_STUB,
 	MSM_FRONTEND_DAI_VOLTE,
+	MSM_FRONTEND_DAI_DTMF_RX,
+	MSM_FRONTEND_DAI_LSM1,
+	MSM_FRONTEND_DAI_VOICE2,
 	MSM_FRONTEND_DAI_MAX,
 };
 
-#define MSM_FRONTEND_DAI_MM_SIZE (MSM_FRONTEND_DAI_MULTIMEDIA4 + 1)
-#define MSM_FRONTEND_DAI_MM_MAX_ID MSM_FRONTEND_DAI_MULTIMEDIA4
+#define MSM_FRONTEND_DAI_MM_SIZE (MSM_FRONTEND_DAI_MULTIMEDIA8 + 1)
+#define MSM_FRONTEND_DAI_MM_MAX_ID MSM_FRONTEND_DAI_MULTIMEDIA8
 
 enum {
 	MSM_BACKEND_DAI_PRI_I2S_RX = 0,
@@ -96,6 +111,7 @@ enum {
 	MSM_BACKEND_DAI_SLIMBUS_4_TX,
 	MSM_BACKEND_DAI_SLIMBUS_3_RX,
 	MSM_BACKEND_DAI_SLIMBUS_3_TX,
+	MSM_BACKEND_DAI_SLIMBUS_5_TX,
 	MSM_BACKEND_DAI_EXTPROC_RX,
 	MSM_BACKEND_DAI_EXTPROC_TX,
 	MSM_BACKEND_DAI_EXTPROC_EC_TX,
@@ -103,6 +119,13 @@ enum {
 	MSM_BACKEND_DAI_QUATERNARY_MI2S_TX,
 	MSM_BACKEND_DAI_SECONDARY_MI2S_RX,
 	MSM_BACKEND_DAI_SECONDARY_MI2S_TX,
+	MSM_BACKEND_DAI_PRI_MI2S_RX,
+	MSM_BACKEND_DAI_PRI_MI2S_TX,
+	MSM_BACKEND_DAI_TERTIARY_MI2S_RX,
+	MSM_BACKEND_DAI_TERTIARY_MI2S_TX,
+	MSM_BACKEND_DAI_AUDIO_I2S_RX,
+	MSM_BACKEND_DAI_SEC_AUXPCM_RX,
+	MSM_BACKEND_DAI_SEC_AUXPCM_TX,
 	MSM_BACKEND_DAI_MAX,
 };
 
@@ -110,7 +133,7 @@ enum {
  * dspst_id:  DSP audio stream ID
  * stream_type: playback or capture
  */
-void msm_pcm_routing_reg_phy_stream(int fedai_id, int dspst_id,
+void msm_pcm_routing_reg_phy_stream(int fedai_id, bool perf_mode, int dspst_id,
 	int stream_type);
 void msm_pcm_routing_reg_psthr_stream(int fedai_id, int dspst_id,
 		int stream_type);
@@ -125,4 +148,7 @@ int multi_ch_pcm_set_volume(unsigned volume);
 
 int compressed_set_volume(unsigned volume);
 
+uint32_t get_adm_rx_topology(void);
+
+uint32_t get_adm_tx_topology(void);
 #endif /*_MSM_PCM_H*/

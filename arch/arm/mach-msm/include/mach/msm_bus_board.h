@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -24,7 +24,7 @@ enum context {
 
 struct msm_bus_fabric_registration {
 	unsigned int id;
-	char *name;
+	const char *name;
 	struct msm_bus_node_info *info;
 	unsigned int len;
 	int ahb;
@@ -33,9 +33,9 @@ struct msm_bus_fabric_registration {
 	unsigned int offset;
 	unsigned int haltid;
 	unsigned int rpm_enabled;
-	const unsigned int nmasters;
-	const unsigned int nslaves;
-	const unsigned int ntieredslaves;
+	unsigned int nmasters;
+	unsigned int nslaves;
+	unsigned int ntieredslaves;
 	bool il_flag;
 	const struct msm_bus_board_algorithm *board_algo;
 	int hw_sel;
@@ -102,6 +102,9 @@ void msm_bus_rpm_set_mt_mask(void);
 int msm_bus_board_rpm_get_il_ids(uint16_t *id);
 int msm_bus_board_get_iid(int id);
 
+#define NFAB_MSM8226 6
+#define NFAB_MSM8610 5
+
 /*
  * These macros specify the convention followed for allocating
  * ids to fabrics, masters and slaves for 8x60.
@@ -111,7 +114,6 @@ int msm_bus_board_get_iid(int id);
  */
 #define FABRIC_ID_KEY 1024
 #define SLAVE_ID_KEY ((FABRIC_ID_KEY) >> 1)
-#define NUM_FAB 5
 #define MAX_FAB_KEY 7168  /* OR(All fabric ids) */
 
 #define GET_FABID(id) ((id) & MAX_FAB_KEY)
@@ -299,8 +301,9 @@ enum msm_bus_fabric_master_type {
 	MSM_BUS_MASTER_V_OCMEM_GFX3D,
 	MSM_BUS_MASTER_IPA,
 	MSM_BUS_MASTER_QPIC,
+	MSM_BUS_MASTER_MDPE,
 
-	MSM_BUS_MASTER_LAST = MSM_BUS_MASTER_QPIC,
+	MSM_BUS_MASTER_LAST,
 
 	MSM_BUS_SYSTEM_FPB_MASTER_SYSTEM =
 		MSM_BUS_SYSTEM_MASTER_SYSTEM_FPB,
@@ -456,8 +459,9 @@ enum msm_bus_fabric_slave_type {
 	MSM_BUS_SLAVE_SERVICE_CNOC,
 	MSM_BUS_SLAVE_IPS_CFG,
 	MSM_BUS_SLAVE_QPIC,
+	MSM_BUS_SLAVE_DSI_CFG,
 
-	MSM_BUS_SLAVE_LAST = MSM_BUS_SLAVE_QPIC,
+	MSM_BUS_SLAVE_LAST,
 
 	MSM_BUS_SYSTEM_FPB_SLAVE_SYSTEM =
 		MSM_BUS_SYSTEM_SLAVE_SYSTEM_FPB,

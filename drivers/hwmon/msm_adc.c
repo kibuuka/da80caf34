@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2012, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -102,7 +102,12 @@ static bool epm_fluid_enabled;
 /* Needed to support file_op interfaces */
 static struct msm_adc_drv *msm_adc_drv;
 
-static bool conv_first_request;
+// modified by yafi-begin
+#if defined(ORG_VER)
+#else
+bool msm_adc_inited = false;
+#endif
+// modified by yafi-end
 
 static ssize_t msm_adc_show_curr(struct device *dev,
 				struct device_attribute *devattr, char *buf);
@@ -734,13 +739,13 @@ static int msm_adc_blocking_conversion(struct msm_adc_drv *msm_adc,
 	struct msm_adc_channels *channel = &pdata->channel[hwmon_chan];
 	int ret = 0;
 
-	if (conv_first_request) {
+	if (msm_adc_inited) {
 		ret = pm8058_xoadc_calib_device(channel->adc_dev_instance);
 		if (ret) {
 			pr_err("pmic8058 xoadc calibration failed, retry\n");
 			return ret;
 		}
-		conv_first_request = false;
+		msm_adc_inited = false;
 	}
 
 	channel->adc_access_fn->adc_slot_request(channel->adc_dev_instance,
@@ -831,13 +836,13 @@ int32_t adc_channel_request_conv(void *h, struct completion *conv_complete_evt)
 	struct adc_conv_slot *slot;
 	int ret;
 
-	if (conv_first_request) {
+	if (msm_adc_inited) {
 		ret = pm8058_xoadc_calib_device(channel->adc_dev_instance);
 		if (ret) {
 			pr_err("pmic8058 xoadc calibration failed, retry\n");
 			return ret;
 		}
-		conv_first_request = false;
+		msm_adc_inited = false;
 	}
 
 	channel->adc_access_fn->adc_slot_request(channel->adc_dev_instance,
@@ -1452,7 +1457,13 @@ static int __devinit msm_adc_probe(struct platform_device *pdev)
 		else
 			msm_rpc_adc_init(pdev);
 	}
-	conv_first_request = true;
+
+// modified by yafi-begin
+#if defined(ORG_VER)
+#else
+	msm_adc_inited = true;
+#endif
+// modified by yafi-end
 
 	pr_info("msm_adc successfully registered\n");
 

@@ -1,7 +1,7 @@
 /* linux/include/asm-arm/arch-msm/msm_smd.h
  *
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2009-2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2009-2013, The Linux Foundation. All rights reserved.
  * Author: Brian Swetland <swetland@google.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -19,7 +19,9 @@
 #define __ASM_ARCH_MSM_SMD_H
 
 #include <linux/io.h>
-#include <mach/msm_smsm.h>
+#include <linux/notifier.h>
+
+#include <mach/msm_smem.h>
 
 typedef struct smd_channel smd_channel_t;
 
@@ -40,13 +42,13 @@ typedef struct smd_channel smd_channel_t;
  * SMD, the entry will only exist in this enum.
  */
 enum {
-	SMD_APPS = SMSM_APPS,
-	SMD_MODEM = SMSM_MODEM,
-	SMD_Q6 = SMSM_Q6,
-	SMD_WCNSS = SMSM_WCNSS,
-	SMD_DSPS = SMSM_DSPS,
-	SMD_MODEM_Q6_FW,
-	SMD_RPM,
+	SMD_APPS = SMEM_APPS,
+	SMD_MODEM = SMEM_MODEM,
+	SMD_Q6 = SMEM_Q6,
+	SMD_DSPS = SMEM_DSPS,
+	SMD_WCNSS = SMEM_WCNSS,
+	SMD_MODEM_Q6_FW = SMEM_MODEM_Q6_FW,
+	SMD_RPM = SMEM_RPM,
 	NUM_SMD_SUBSYSTEMS,
 };
 
@@ -141,8 +143,8 @@ struct smd_subsystem_restart_config {
  * @size: size of the region in bytes
  */
 struct smd_smem_regions {
-	void *phys_addr;
-	unsigned size;
+	phys_addr_t phys_addr;
+	resource_size_t size;
 };
 
 struct smd_platform {
@@ -278,6 +280,17 @@ int smd_write_segment(smd_channel_t *ch, void *data, int len, int user_buf);
  *      -E2BIG - some ammount of packet is not yet written
  */
 int smd_write_end(smd_channel_t *ch);
+
+/**
+ * smd_write_segment_avail() - available write space for packet transactions
+ * @ch: channel to write packet to
+ * @returns: number of bytes available to write to, or -ENODEV for invalid ch
+ *
+ * This is a version of smd_write_avail() intended for use with packet
+ * transactions.  This version correctly accounts for any internal reserved
+ * space at all stages of the transaction.
+ */
+int smd_write_segment_avail(smd_channel_t *ch);
 
 /*
  * Returns a pointer to the subsystem name or NULL if no
@@ -437,6 +450,11 @@ smd_write_segment(smd_channel_t *ch, void *data, int len, int user_buf)
 }
 
 static inline int smd_write_end(smd_channel_t *ch)
+{
+	return -ENODEV;
+}
+
+static inline int smd_write_segment_avail(smd_channel_t *ch)
 {
 	return -ENODEV;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -27,12 +27,6 @@
 
 #define MPQ8092_QGIC_DIST_PHYS	0xF9000000
 #define MPQ8092_QGIC_DIST_SIZE	SZ_4K
-
-#define MPQ8092_QGIC_CPU_PHYS	0xF9002000
-#define MPQ8092_QGIC_CPU_SIZE	SZ_4K
-
-#define MPQ8092_APCS_GCC_PHYS	0xF9011000
-#define MPQ8092_APCS_GCC_SIZE	SZ_4K
 
 #define MPQ8092_TLMM_PHYS	0xFD510000
 #define MPQ8092_TLMM_SIZE	SZ_16K

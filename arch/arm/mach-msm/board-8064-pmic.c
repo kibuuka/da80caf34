@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -130,6 +130,25 @@ static struct pm8xxx_gpio_init pm8921_gpios[] __initdata = {
 	PM8921_GPIO_INPUT(12, PM_GPIO_PULL_UP_30),     /* PCIE_WAKE_N */
 };
 
+static struct pm8xxx_gpio_init pm8921_fsm8064_ep_gpios[] __initdata = {
+	PM8921_GPIO_OUTPUT_VIN(1, 1, PM_GPIO_VIN_VPH),	/* 5V reg */
+	PM8921_GPIO_OUTPUT_VIN(12, 1, PM_GPIO_VIN_VPH),	/* 12V reg */
+	/* De-assert CW_GPS_RST_N for CW GPS module to lock to GPS source */
+	PM8921_GPIO_OUTPUT_VIN(14, 1, PM_GPIO_VIN_VPH),
+	/* PPS_SRC_SEL_N, chooses between WGR7640 PPS source (high) or
+	 * CW GPS module PPS source (low) */
+	PM8921_GPIO_OUTPUT_VIN(19, 0, PM_GPIO_VIN_VPH),	/* PPS_SRC_SEL_N */
+
+	PM8921_GPIO_OUTPUT_VIN(13, 1, PM_GPIO_VIN_VPH),	/* PCIE_CLK_PWR_EN */
+	PM8921_GPIO_OUTPUT_VIN(37, 1, PM_GPIO_VIN_VPH),	/* PCIE_RST_N */
+	PM8921_GPIO_INPUT(11, PM_GPIO_PULL_UP_30),	/* PCIE_WAKE_N */
+
+	PM8921_GPIO_OUTPUT_VIN(23, 1, PM_GPIO_VIN_VPH),	/* USB2_HSIC_RST_N */
+
+	PM8921_GPIO_OUTPUT_VIN(24, 1, PM_GPIO_VIN_VPH),	/* USB3_RST_N */
+	PM8921_GPIO_OUTPUT_VIN(34, 1, PM_GPIO_VIN_VPH),	/* USB4_RST_N */
+};
+
 static struct pm8xxx_gpio_init pm8921_mtp_kp_gpios[] __initdata = {
 	PM8921_GPIO_INPUT(3, PM_GPIO_PULL_UP_30),
 	PM8921_GPIO_INPUT(4, PM_GPIO_PULL_UP_30),
@@ -209,10 +228,27 @@ void __init apq8064_pm8xxx_gpio_mpp_init(void)
 {
 	int i, rc;
 
-	if (socinfo_get_pmic_model() != PMIC_MODEL_PM8917)
-		apq8064_configure_gpios(pm8921_gpios, ARRAY_SIZE(pm8921_gpios));
-	else
+	if (socinfo_get_pmic_model() != PMIC_MODEL_PM8917) {
+		/* PCIE_CLK_PWR_EN is 23 and PCIE_WAKE_N is 22
+		   for MPQ8064 Hybrid */
+		if (machine_is_mpq8064_hrd()) {
+			int size = ARRAY_SIZE(pm8921_gpios);
+			for (i = 0; i < size; i++)
+				if (pm8921_gpios[i].gpio == 13)
+					pm8921_gpios[i].gpio = 23;
+				else if (pm8921_gpios[i].gpio == 12)
+					pm8921_gpios[i].gpio = 22;
+		}
+
+		if (machine_is_fsm8064_ep())
+			apq8064_configure_gpios(pm8921_fsm8064_ep_gpios,
+					ARRAY_SIZE(pm8921_fsm8064_ep_gpios));
+		else
+			apq8064_configure_gpios(pm8921_gpios,
+					ARRAY_SIZE(pm8921_gpios));
+	} else {
 		apq8064_configure_gpios(pm8917_gpios, ARRAY_SIZE(pm8917_gpios));
+	}
 
 	if (machine_is_apq8064_cdp() || machine_is_apq8064_liquid()) {
 		apq8064_configure_gpios(touchscreen_gpios,
@@ -437,6 +473,15 @@ apq8064_pm8921_bms_pdata __devinitdata = {
 	.chg_term_ua			= CHG_TERM_MA * 1000,
 	.normal_voltage_calc_ms		= 20000,
 	.low_voltage_calc_ms		= 1000,
+	.alarm_low_mv			= 3400,
+	.alarm_high_mv			= 4000,
+	.high_ocv_correction_limit_uv	= 50,
+	.low_ocv_correction_limit_uv	= 100,
+	.hold_soc_est			= 3,
+	.enable_fcc_learning		= 1,
+	.min_fcc_learning_soc		= 20,
+	.min_fcc_ocv_pc			= 30,
+	.max_fcc_learning_samples	= 5,
 };
 
 static struct pm8921_platform_data
@@ -519,4 +564,7 @@ void __init apq8064_init_pmic(void)
 
 	if (!machine_is_apq8064_mtp() && !machine_is_apq8064_liquid())
 		apq8064_pm8921_chg_pdata.battery_less_hardware = 1;
+
+	if (machine_is_mpq8064_hrd())
+		apq8064_pm8921_chg_pdata.disable_chg_rmvl_wrkarnd = 1;
 }

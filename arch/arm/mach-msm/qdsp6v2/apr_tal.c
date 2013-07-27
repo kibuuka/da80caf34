@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2011, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -133,12 +133,12 @@ check_write_avail:
 		spin_unlock_irqrestore(&apr_ch->lock, flags);
 		break;
 	case SMD_EVENT_OPEN:
-		pr_info("apr_tal: SMD_EVENT_OPEN\n");
+		pr_debug("apr_tal: SMD_EVENT_OPEN\n");
 		apr_ch->smd_state = 1;
 		wake_up(&apr_ch->wait);
 		break;
 	case SMD_EVENT_CLOSE:
-		pr_info("apr_tal: SMD_EVENT_CLOSE\n");
+		pr_debug("apr_tal: SMD_EVENT_CLOSE\n");
 		break;
 	}
 }

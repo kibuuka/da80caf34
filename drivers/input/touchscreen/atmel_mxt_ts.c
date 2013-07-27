@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2010 Samsung Electronics Co.Ltd
  * Author: Joonyoung Shim <jy0922.shim@samsung.com>
- * Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute  it and/or modify it
  * under  the terms of  the GNU General  Public License as published by the
@@ -27,10 +27,23 @@
 #include <linux/regulator/consumer.h>
 #include <linux/string.h>
 #include <linux/of_gpio.h>
-#if defined(CONFIG_HAS_EARLYSUSPEND)
+
+#if defined(CONFIG_FB)
+#include <linux/notifier.h>
+#include <linux/fb.h>
+
+#elif defined(CONFIG_HAS_EARLYSUSPEND)
 #include <linux/earlysuspend.h>
 /* Early-suspend level */
 #define MXT_SUSPEND_LEVEL 1
+#endif
+
+#if defined(CONFIG_SECURE_TOUCH)
+#include <linux/completion.h>
+#include <linux/pm_runtime.h>
+#include <linux/errno.h>
+#include <asm/system.h>
+#include <linux/atomic.h>
 #endif
 
 /* Family ID */
@@ -115,6 +128,7 @@ enum mxt_device_state { INIT, APPMODE, BOOTLOADER };
 #define MXT_SPT_DIGITIZER_T43		43
 #define MXT_SPT_MESSAGECOUNT_T44	44
 #define MXT_SPT_CTECONFIG_T46		46
+#define MXT_SPT_EXTRANOISESUPCTRLS_T58	58
 #define MXT_SPT_TIMER_T61		61
 
 /* MXT_GEN_COMMAND_T6 field */
@@ -356,7 +370,10 @@ struct mxt_data {
 	struct regulator *vcc_ana;
 	struct regulator *vcc_dig;
 	struct regulator *vcc_i2c;
-#if defined(CONFIG_HAS_EARLYSUSPEND)
+	struct mxt_address_pair addr_pair;
+#if defined(CONFIG_FB)
+	struct notifier_block fb_notif;
+#elif defined(CONFIG_HAS_EARLYSUSPEND)
 	struct early_suspend early_suspend;
 #endif
 
@@ -376,6 +393,12 @@ struct mxt_data {
 	bool update_cfg;
 	const char *fw_name;
 	bool no_force_update;
+#if defined(CONFIG_SECURE_TOUCH)
+	atomic_t st_enabled;
+	atomic_t st_pending_irqs;
+	struct completion st_completion;
+	struct completion st_powerdown;
+#endif
 };
 
 static struct dentry *debug_base;
@@ -411,6 +434,7 @@ static bool mxt_object_readable(unsigned int type)
 	case MXT_SPT_USERDATA_T38:
 	case MXT_SPT_DIGITIZER_T43:
 	case MXT_SPT_CTECONFIG_T46:
+	case MXT_SPT_EXTRANOISESUPCTRLS_T58:
 	case MXT_SPT_TIMER_T61:
 	case MXT_PROCI_ADAPTIVETHRESHOLD_T55:
 		return true;
@@ -448,6 +472,7 @@ static bool mxt_object_writable(unsigned int type)
 	case MXT_SPT_USERDATA_T38:
 	case MXT_SPT_DIGITIZER_T43:
 	case MXT_SPT_CTECONFIG_T46:
+	case MXT_SPT_EXTRANOISESUPCTRLS_T58:
 	case MXT_SPT_TIMER_T61:
 	case MXT_PROCI_ADAPTIVETHRESHOLD_T55:
 		return true;
@@ -470,9 +495,27 @@ static void mxt_dump_message(struct device *dev,
 	dev_dbg(dev, "checksum:\t0x%x\n", message->checksum);
 }
 
-static int mxt_switch_to_bootloader_address(struct mxt_data *data)
+static int mxt_lookup_bootloader_address(struct mxt_data *data)
 {
 	int i;
+
+	for (i = 0; mxt_slave_addresses[i].application != 0;  i++) {
+		if (mxt_slave_addresses[i].application ==
+				data->client->addr) {
+			data->addr_pair.bootloader =
+				mxt_slave_addresses[i].bootloader;
+			return 0;
+		}
+	}
+
+	dev_err(&data->client->dev, "Address 0x%02x not found in address table",
+			data->client->addr);
+	return -EINVAL;
+
+};
+
+static int mxt_switch_to_bootloader_address(struct mxt_data *data)
+{
 	struct i2c_client *client = data->client;
 
 	if (data->state == BOOTLOADER) {
@@ -480,27 +523,16 @@ static int mxt_switch_to_bootloader_address(struct mxt_data *data)
 		return -EINVAL;
 	}
 
-	for (i = 0; mxt_slave_addresses[i].application != 0;  i++) {
-		if (mxt_slave_addresses[i].application == client->addr) {
-			dev_info(&client->dev, "Changing to bootloader address: "
-				"%02x -> %02x",
-				client->addr,
-				mxt_slave_addresses[i].bootloader);
+	dev_info(&client->dev, "Changing to bootloader address: 0x%02x -> 0x%02x",
+			client->addr, data->addr_pair.bootloader);
 
-			client->addr = mxt_slave_addresses[i].bootloader;
-			data->state = BOOTLOADER;
-			return 0;
-		}
-	}
-
-	dev_err(&client->dev, "Address 0x%02x not found in address table",
-								client->addr);
-	return -EINVAL;
+	client->addr = data->addr_pair.bootloader;
+	data->state = BOOTLOADER;
+	return 0;
 }
 
 static int mxt_switch_to_appmode_address(struct mxt_data *data)
 {
-	int i;
 	struct i2c_client *client = data->client;
 
 	if (data->state == APPMODE) {
@@ -508,23 +540,13 @@ static int mxt_switch_to_appmode_address(struct mxt_data *data)
 		return -EINVAL;
 	}
 
-	for (i = 0; mxt_slave_addresses[i].application != 0;  i++) {
-		if (mxt_slave_addresses[i].bootloader == client->addr) {
-			dev_info(&client->dev,
-				"Changing to application mode address: "
-							"0x%02x -> 0x%02x",
-				client->addr,
-				mxt_slave_addresses[i].application);
+	dev_info(&client->dev, "Changing to application mode address: " \
+			"0x%02x -> 0x%02x", client->addr,
+			data->addr_pair.application);
 
-			client->addr = mxt_slave_addresses[i].application;
-			data->state = APPMODE;
-			return 0;
-		}
-	}
-
-	dev_err(&client->dev, "Address 0x%02x not found in address table",
-								client->addr);
-	return -EINVAL;
+	client->addr = data->addr_pair.application;
+	data->state = APPMODE;
+	return 0;
 }
 
 static int mxt_get_bootloader_version(struct i2c_client *client, u8 val)
@@ -868,6 +890,17 @@ static void mxt_input_report(struct mxt_data *data, int single_id)
 	input_sync(input_dev);
 }
 
+static void mxt_release_all(struct mxt_data *data)
+{
+	int id;
+
+	for (id = 0; id < MXT_MAX_FINGER; id++)
+		if (data->finger[id].status)
+			data->finger[id].status = MXT_RELEASE;
+
+	mxt_input_report(data, 0);
+}
+
 static void mxt_input_touchevent(struct mxt_data *data,
 				      struct mxt_message *message, int id)
 {
@@ -879,6 +912,10 @@ static void mxt_input_touchevent(struct mxt_data *data,
 	int area;
 	int pressure;
 
+	if (status & MXT_SUPPRESS) {
+		mxt_release_all(data);
+		return;
+	}
 	/* Check the touch is present on the screen */
 	if (!(status & MXT_DETECT)) {
 		if (status & MXT_RELEASE) {
@@ -953,24 +990,30 @@ static void mxt_handle_key_array(struct mxt_data *data,
 	data->keyarray_old = data->keyarray_new;
 }
 
-static void mxt_release_all(struct mxt_data *data)
-{
-	int id;
-
-	for (id = 0; id < MXT_MAX_FINGER; id++)
-		if (data->finger[id].status)
-			data->finger[id].status = MXT_RELEASE;
-
-	mxt_input_report(data, 0);
-}
-
-static void mxt_handle_touch_supression(struct mxt_data *data, u8 status)
+static void mxt_handle_touch_suppression(struct mxt_data *data, u8 status)
 {
 	dev_dbg(&data->client->dev, "touch suppression\n");
 	/* release all touches */
 	if (status & MXT_TCHSUP_ACTIVE)
 		mxt_release_all(data);
 }
+
+#if defined(CONFIG_SECURE_TOUCH)
+static irqreturn_t mxt_filter_interrupt(struct mxt_data *data)
+{
+	if (atomic_read(&data->st_enabled)) {
+		if (atomic_cmpxchg(&data->st_pending_irqs, 0, 1) == 0)
+			complete(&data->st_completion);
+		return IRQ_HANDLED;
+	}
+	return IRQ_NONE;
+}
+#else
+static irqreturn_t mxt_filter_interrupt(struct mxt_data *data)
+{
+	return IRQ_NONE;
+}
+#endif
 
 static irqreturn_t mxt_interrupt(int irq, void *dev_id)
 {
@@ -984,6 +1027,9 @@ static irqreturn_t mxt_interrupt(int irq, void *dev_id)
 		dev_err(dev, "Ignoring IRQ - not in APPMODE state\n");
 		return IRQ_HANDLED;
 	}
+
+	if (IRQ_HANDLED == mxt_filter_interrupt(data))
+		goto end;
 
 	do {
 		if (mxt_read_message(data, &message)) {
@@ -999,7 +1045,7 @@ static irqreturn_t mxt_interrupt(int irq, void *dev_id)
 
 		id = reportid - data->t9_min_reportid;
 
-		 /* check whether report id is part of T9,T15 or T42*/
+		 /* check whether report id is part of T9, T15 or T42 */
 		if (reportid >= data->t9_min_reportid &&
 					reportid <= data->t9_max_reportid)
 			mxt_input_touchevent(data, &message, id);
@@ -1007,8 +1053,9 @@ static irqreturn_t mxt_interrupt(int irq, void *dev_id)
 					reportid <= data->t15_max_reportid)
 			mxt_handle_key_array(data, &message);
 		else if (reportid >= data->t42_min_reportid &&
-					reportid <= data->t42_max_reportid)
-			mxt_handle_touch_supression(data, message.message[0]);
+				reportid <= data->t42_max_reportid)
+			mxt_handle_touch_suppression(data,
+					message.message[0]);
 		else
 			mxt_dump_message(dev, &message);
 	} while (reportid != 0xff);
@@ -1655,9 +1702,11 @@ static int mxt_load_fw(struct device *dev, const char *fn)
 	switch (data->info.family_id) {
 	case MXT224_ID:
 	case MXT224E_ID:
+	case MXT336S_ID:
 		max_frame_size = MXT_SINGLE_FW_MAX_FRAME_SIZE;
 		break;
 	case MXT1386_ID:
+	case MXT1664S_ID:
 		max_frame_size = MXT_CHIPSET_FW_MAX_FRAME_SIZE;
 		break;
 	default:
@@ -1903,6 +1952,103 @@ static ssize_t mxt_update_fw_store(struct device *dev,
 	return count;
 }
 
+#if defined(CONFIG_SECURE_TOUCH)
+
+static ssize_t mxt_secure_touch_enable_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	return scnprintf(buf, PAGE_SIZE, "%d", atomic_read(&data->st_enabled));
+}
+/*
+ * Accept only "0" and "1" valid values.
+ * "0" will reset the st_enabled flag, then wake up the reading process.
+ * The bus driver is notified via pm_runtime that it is not required to stay
+ * awake anymore.
+ * It will also make sure the queue of events is emptied in the controller,
+ * in case a touch happened in between the secure touch being disabled and
+ * the local ISR being ungated.
+ * "1" will set the st_enabled flag and clear the st_pending_irqs flag.
+ * The bus driver is requested via pm_runtime to stay awake.
+ */
+static ssize_t mxt_secure_touch_enable_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	unsigned long value;
+	int err = 0;
+
+	if (count > 2)
+		return -EINVAL;
+
+	err = kstrtoul(buf, 10, &value);
+	if (err != 0)
+		return err;
+
+	err = count;
+
+	switch (value) {
+	case 0:
+		if (atomic_read(&data->st_enabled) == 0)
+			break;
+
+		pm_runtime_put(&data->client->adapter->dev);
+		atomic_set(&data->st_enabled, 0);
+		complete(&data->st_completion);
+		mxt_interrupt(data->client->irq, data);
+		complete(&data->st_powerdown);
+		break;
+	case 1:
+		if (atomic_read(&data->st_enabled)) {
+			err = -EBUSY;
+			break;
+		}
+
+		if (pm_runtime_get(data->client->adapter->dev.parent) < 0) {
+			dev_err(&data->client->dev, "pm_runtime_get failed\n");
+			err = -EIO;
+			break;
+		}
+		INIT_COMPLETION(data->st_completion);
+		INIT_COMPLETION(data->st_powerdown);
+		atomic_set(&data->st_pending_irqs, 0);
+		atomic_set(&data->st_enabled, 1);
+		break;
+	default:
+		dev_err(&data->client->dev, "unsupported value: %lu\n", value);
+		err = -EINVAL;
+		break;
+	}
+
+	return err;
+}
+
+static ssize_t mxt_secure_touch_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	struct mxt_data *data = dev_get_drvdata(dev);
+	int err;
+
+	if (atomic_read(&data->st_enabled) == 0)
+		return -EBADF;
+
+	err = wait_for_completion_interruptible(&data->st_completion);
+
+	if (err)
+		return err;
+
+	if (atomic_cmpxchg(&data->st_pending_irqs, 1, 0) != 1)
+		return -EINVAL;
+
+	return scnprintf(buf, PAGE_SIZE, "%u", 1);
+}
+
+static DEVICE_ATTR(secure_touch_enable, 0666, mxt_secure_touch_enable_show,
+	mxt_secure_touch_enable_store);
+static DEVICE_ATTR(secure_touch, 0444, mxt_secure_touch_show, NULL);
+#endif
+
 static DEVICE_ATTR(object, 0444, mxt_object_show, NULL);
 static DEVICE_ATTR(update_fw, 0664, NULL, mxt_update_fw_store);
 static DEVICE_ATTR(force_cfg_update, 0664, NULL, mxt_force_cfg_update_store);
@@ -1911,6 +2057,10 @@ static struct attribute *mxt_attrs[] = {
 	&dev_attr_object.attr,
 	&dev_attr_update_fw.attr,
 	&dev_attr_force_cfg_update.attr,
+#if defined(CONFIG_SECURE_TOUCH)
+	&dev_attr_secure_touch_enable.attr,
+	&dev_attr_secure_touch.attr,
+#endif
 	NULL
 };
 
@@ -1918,9 +2068,25 @@ static const struct attribute_group mxt_attr_group = {
 	.attrs = mxt_attrs,
 };
 
+
+#if defined(CONFIG_SECURE_TOUCH)
+static void mxt_secure_touch_stop(struct mxt_data *data)
+{
+	if (atomic_read(&data->st_enabled)) {
+		complete(&data->st_completion);
+		wait_for_completion_interruptible(&data->st_powerdown);
+	}
+}
+#else
+static void mxt_secure_touch_stop(struct mxt_data *data)
+{
+}
+#endif
+
 static int mxt_start(struct mxt_data *data)
 {
 	int error;
+	mxt_secure_touch_stop(data);
 
 	/* restore the old power state values and reenable touch */
 	error = __mxt_write_reg(data->client, data->t7_start_addr,
@@ -1938,6 +2104,7 @@ static int mxt_stop(struct mxt_data *data)
 {
 	int error;
 	u8 t7_data[T7_DATA_SIZE] = {0};
+	mxt_secure_touch_stop(data);
 
 	error = __mxt_write_reg(data->client, data->t7_start_addr,
 				T7_DATA_SIZE, t7_data);
@@ -2319,6 +2486,7 @@ static int mxt_resume(struct device *dev)
 
 	/* calibrate */
 	if (data->pdata->need_calibration) {
+		mxt_secure_touch_stop(data);
 		error = mxt_write_object(data, MXT_GEN_COMMAND_T6,
 					MXT_COMMAND_CALIBRATE, 1);
 		if (error < 0)
@@ -2330,24 +2498,8 @@ static int mxt_resume(struct device *dev)
 	return 0;
 }
 
-#if defined(CONFIG_HAS_EARLYSUSPEND)
-static void mxt_early_suspend(struct early_suspend *h)
-{
-	struct mxt_data *data = container_of(h, struct mxt_data, early_suspend);
-
-	mxt_suspend(&data->client->dev);
-}
-
-static void mxt_late_resume(struct early_suspend *h)
-{
-	struct mxt_data *data = container_of(h, struct mxt_data, early_suspend);
-
-	mxt_resume(&data->client->dev);
-}
-#endif
-
 static const struct dev_pm_ops mxt_pm_ops = {
-#ifndef CONFIG_HAS_EARLYSUSPEND
+#if (!defined(CONFIG_FB) && !defined(CONFIG_HAS_EARLYSUSPEND))
 	.suspend	= mxt_suspend,
 	.resume		= mxt_resume,
 #endif
@@ -2564,6 +2716,12 @@ static int mxt_parse_dt(struct device *dev, struct mxt_platform_data *pdata)
 		return -ENOMEM;
 	}
 
+	rc = of_property_read_u32(np, "atmel,bl-addr", &temp_val);
+	if (rc && (rc != -EINVAL))
+		dev_err(dev, "Unable to read bootloader address\n");
+	else if (rc != -EINVAL)
+		pdata->bl_addr = (u8) temp_val;
+
 	pdata->config_array  = info;
 
 	for_each_child_of_node(np, temp) {
@@ -2602,12 +2760,11 @@ static int mxt_parse_dt(struct device *dev, struct mxt_platform_data *pdata)
 		} else
 			info->build = (u8) temp_val;
 
-		info->bootldr_id = of_property_read_u32(temp,
+		rc = of_property_read_u32(temp,
 					"atmel,bootldr-id", &temp_val);
-		if (rc) {
+		if (rc && (rc != -EINVAL))
 			dev_err(dev, "Unable to read bootldr-id\n");
-			return rc;
-		} else
+		else if (rc != -EINVAL)
 			info->bootldr_id = (u8) temp_val;
 
 		rc = mxt_parse_config(dev, temp, info);
@@ -2624,6 +2781,55 @@ static int mxt_parse_dt(struct device *dev, struct mxt_platform_data *pdata)
 static int mxt_parse_dt(struct device *dev, struct mxt_platform_data *pdata)
 {
 	return -ENODEV;
+}
+#endif
+
+#if defined(CONFIG_FB)
+static int fb_notifier_callback(struct notifier_block *self,
+				 unsigned long event, void *data)
+{
+	struct fb_event *evdata = data;
+	int *blank;
+	struct mxt_data *mxt_dev_data =
+		container_of(self, struct mxt_data, fb_notif);
+
+	if (evdata && evdata->data && event == FB_EVENT_BLANK && mxt_dev_data &&
+			mxt_dev_data->client) {
+		blank = evdata->data;
+		if (*blank == FB_BLANK_UNBLANK)
+			mxt_resume(&mxt_dev_data->client->dev);
+		else if (*blank == FB_BLANK_POWERDOWN)
+			mxt_suspend(&mxt_dev_data->client->dev);
+	}
+
+	return 0;
+}
+#elif defined(CONFIG_HAS_EARLYSUSPEND)
+static void mxt_early_suspend(struct early_suspend *h)
+{
+	struct mxt_data *data = container_of(h, struct mxt_data,
+						early_suspend);
+	mxt_suspend(&data->client->dev);
+}
+
+static void mxt_late_resume(struct early_suspend *h)
+{
+	struct mxt_data *data = container_of(h, struct mxt_data,
+						early_suspend);
+	mxt_resume(&data->client->dev);
+}
+
+#endif
+
+#if defined(CONFIG_SECURE_TOUCH)
+static void __devinit mxt_secure_touch_init(struct mxt_data *data)
+{
+	init_completion(&data->st_completion);
+	init_completion(&data->st_powerdown);
+}
+#else
+static void __devinit mxt_secure_touch_init(struct mxt_data *data)
+{
 }
 #endif
 
@@ -2767,6 +2973,13 @@ static int __devinit mxt_probe(struct i2c_client *client,
 
 	mxt_power_on_delay(data);
 
+	data->addr_pair.application = data->client->addr;
+
+	if (pdata->bl_addr)
+		data->addr_pair.bootloader = pdata->bl_addr;
+	else
+		mxt_lookup_bootloader_address(data);
+
 	error = mxt_initialize(data);
 	if (error)
 		goto err_reset_gpio_req;
@@ -2794,7 +3007,15 @@ static int __devinit mxt_probe(struct i2c_client *client,
 	if (error)
 		goto err_unregister_device;
 
-#if defined(CONFIG_HAS_EARLYSUSPEND)
+#if defined(CONFIG_FB)
+	data->fb_notif.notifier_call = fb_notifier_callback;
+
+	error = fb_register_client(&data->fb_notif);
+
+	if (error)
+		dev_err(&client->dev, "Unable to register fb_notifier: %d\n",
+			error);
+#elif defined(CONFIG_HAS_EARLYSUSPEND)
 	data->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN +
 						MXT_SUSPEND_LEVEL;
 	data->early_suspend.suspend = mxt_early_suspend;
@@ -2803,6 +3024,8 @@ static int __devinit mxt_probe(struct i2c_client *client,
 #endif
 
 	mxt_debugfs_init(data);
+
+	mxt_secure_touch_init(data);
 
 	return 0;
 
@@ -2842,7 +3065,10 @@ static int __devexit mxt_remove(struct i2c_client *client)
 	sysfs_remove_group(&client->dev.kobj, &mxt_attr_group);
 	free_irq(data->irq, data);
 	input_unregister_device(data->input_dev);
-#if defined(CONFIG_HAS_EARLYSUSPEND)
+#if defined(CONFIG_FB)
+	if (fb_unregister_client(&data->fb_notif))
+		dev_err(&client->dev, "Error occurred while unregistering fb_notifier.\n");
+#elif defined(CONFIG_HAS_EARLYSUSPEND)
 	unregister_early_suspend(&data->early_suspend);
 #endif
 

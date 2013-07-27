@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -11,9 +11,9 @@
  */
 
 /include/ "msm8974-leds.dtsi"
-/include/ "msm8974-camera-sensor.dtsi"
+/include/ "msm8974-camera-sensor-cdp.dtsi"
 
-/ {
+&soc {
 	timer {
 		clock-frequency = <5000000>;
 	};
@@ -75,7 +75,7 @@
 		interrupts = <0 105 0>;
 		interrupt-names = "qup_err_intr";
 		qcom,i2c-bus-freq = <100000>;
-		qcom,i2c-src-freq = <24000000>;
+		qcom,i2c-src-freq = <19200000>;
 		gpios = <&msmgpio 83 0>, /* DAT  */
 			<&msmgpio 84 0>; /* CLK */
 	};
@@ -139,4 +139,8 @@
 
 &gdsc_usb_hsic {
         status = "disabled";
+};
+
+&rpm_bus {
+	rpm-standalone;
 };

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2011, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,6 +14,96 @@
 #include <asm/mach-types.h>
 #include <mach/gpiomux.h>
 #include "gpiomux-8x60.h"
+
+// added by yafi-begin
+
+static struct gpiomux_setting smb137b_actv_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+};
+static struct gpiomux_setting smb137b_susp_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+};
+
+static struct gpiomux_setting smb137b_stat_actv_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+static struct gpiomux_setting smb137b_stat_susp_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+
+static struct gpiomux_setting bq27520_socint_actv_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+static struct gpiomux_setting bq27520_socint_susp_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+
+static struct gpiomux_setting bq27520_batlow_actv_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+};
+static struct gpiomux_setting bq27520_batlow_susp_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+};
+
+static struct gpiomux_setting bq27520_batgd_actv_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+static struct gpiomux_setting bq27520_batgd_susp_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+
+// added by yafi-end
+
+// Bato add for CCI unused gpio control
+static struct gpiomux_setting cci_empty_susp_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_NONE,
+	.dir = GPIOMUX_OUT_LOW,
+};
+
+//henry add
+static struct gpiomux_setting mute_key_actv_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+static struct gpiomux_setting mute_key_susp_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct gpiomux_setting volume_key_actv_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+static struct gpiomux_setting volume_key_susp_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_UP,
+};
 
 static struct gpiomux_setting console_uart = {
 	.func = GPIOMUX_FUNC_2,
@@ -66,6 +156,13 @@ static struct gpiomux_setting gsbi8 = {
 	.pull = GPIOMUX_PULL_NONE,
 };
 
+//Cain add by BSP3134 +
+static struct gpiomux_setting bt_io_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_KEEPER,
+};
+
 static struct gpiomux_setting ps_hold = {
 	.func = GPIOMUX_FUNC_1,
 	.drv = GPIOMUX_DRV_12MA,
@@ -90,22 +187,14 @@ static struct gpiomux_setting ebi2_a_d = {
 	.pull = GPIOMUX_PULL_UP,
 };
 
-static struct gpiomux_setting ebi2_oe = {
-	.func = GPIOMUX_FUNC_1,
-	.drv = GPIOMUX_DRV_8MA,
-	.pull = GPIOMUX_PULL_UP,
-};
-
-static struct gpiomux_setting ebi2_we = {
-	.func = GPIOMUX_FUNC_1,
-	.drv = GPIOMUX_DRV_8MA,
-	.pull = GPIOMUX_PULL_UP,
-};
 
 static struct gpiomux_setting ebi2_cs2 = {
 	.func = GPIOMUX_FUNC_2,
 	.drv = GPIOMUX_DRV_8MA,
-	.pull = GPIOMUX_PULL_UP,
+//huapu_cheng: start /20110829 /bugID: 739
+	.pull = GPIOMUX_PULL_DOWN,
+//huapu_cheng: end
+	//.pull = GPIOMUX_PULL_UP,
 };
 
 static struct gpiomux_setting ebi2_cs3 = {
@@ -122,11 +211,15 @@ static struct gpiomux_setting ebi2_cs4 = {
 };
 #endif
 
-static struct gpiomux_setting ebi2_adv = {
+//Leon, prevent FTM gpio reconfig for power saving, it has been configed by aboot: START
+
+/* static struct gpiomux_setting ebi2_adv = {
 	.func = GPIOMUX_FUNC_1,
 	.drv = GPIOMUX_DRV_8MA,
 	.pull = GPIOMUX_PULL_UP,
-};
+}; */
+
+//Leon, prevent FTM gpio reconfig for power saving, it has been configed by aboot: END
 
 #if defined(CONFIG_USB_PEHCI_HCD) || defined(CONFIG_USB_PEHCI_HCD_MODULE)
 static struct gpiomux_setting usb_isp1763_actv_cfg = {
@@ -231,8 +324,8 @@ static struct gpiomux_setting uart1dm_suspended = {
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_DOWN,
 };
-
-static struct gpiomux_setting mi2s_active_cfg = {
+//Bato removed this because not used
+/* static struct gpiomux_setting mi2s_active_cfg = {
 	.func = GPIOMUX_FUNC_1,
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_NONE,
@@ -242,9 +335,25 @@ static struct gpiomux_setting mi2s_suspend_cfg = {
 	.func = GPIOMUX_FUNC_GPIO,
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_DOWN,
+}; */
+
+//B 2011/05/13 JiaHan_Li, Bug 89-[BSP][LED]LED can't be triggered correctly.
+#ifdef CONFIG_LEDS_TCA6507
+static struct gpiomux_setting led_active_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_16MA,
+	.pull = GPIOMUX_PULL_UP,
 };
 
-static struct gpiomux_setting lcdc_active_cfg = {
+static struct gpiomux_setting led_suspend_cfg = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_16MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+#endif
+//E 2011/05/13 JiaHan_Li, Bug 89-[BSP][LED]LED can't be triggered correctly.
+//Bato removed this because not used
+/* static struct gpiomux_setting lcdc_active_cfg = {
 	.func = GPIOMUX_FUNC_1,
 	.drv = GPIOMUX_DRV_16MA,
 	.pull = GPIOMUX_PULL_NONE,
@@ -254,7 +363,7 @@ static struct gpiomux_setting lcdc_suspend_cfg = {
 	.func = GPIOMUX_FUNC_GPIO,
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_DOWN,
-};
+}; */
 
 static struct gpiomux_setting mdp_vsync_suspend_cfg = {
 	.func = GPIOMUX_FUNC_GPIO,
@@ -284,6 +393,14 @@ static struct gpiomux_setting cam_suspend_cfg = {
 	.func = GPIOMUX_FUNC_GPIO,
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_DOWN,
+};
+
+// Bug 901, Luke GPIO tuning, 76
+static struct gpiomux_setting cam_suspend_cfg_cci = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_NONE,
+	.dir = GPIOMUX_OUT_LOW,
 };
 
 static struct gpiomux_setting mdm2ap_sync_active_cfg = {
@@ -316,11 +433,60 @@ static struct gpiomux_setting tma_active = {
 	.pull = GPIOMUX_PULL_UP,
 };
 
-static struct gpiomux_setting ts_suspended = {
+/* static struct gpiomux_setting max_touch_active = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_6MA,
+	.pull = GPIOMUX_PULL_NONE,
+}; */
+
+/* static struct gpiomux_setting max_touch_suspended = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_NONE,
+}; */
+
+//henry
+static struct gpiomux_setting mxt224_touch_active = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct gpiomux_setting mxt224_touch_suspended = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+/* static struct gpiomux_setting ts_ldo_active = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_6MA,
+	.pull = GPIOMUX_PULL_NONE,
+}; 
+
+static struct gpiomux_setting ts_ldo_suspended = {
 	.func = GPIOMUX_FUNC_GPIO,
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_DOWN,
 };
+
+static struct gpiomux_setting lock_active = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_6MA,
+	.pull = GPIOMUX_PULL_UP,
+};
+
+static struct gpiomux_setting ts_active = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_6MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct gpiomux_setting ts_suspended = {
+	.func = GPIOMUX_FUNC_GPIO,
+	.drv = GPIOMUX_DRV_2MA,
+	.pull = GPIOMUX_PULL_DOWN,
+}; */
 
 static struct gpiomux_setting mdp_vsync_active_cfg = {
 	.func = GPIOMUX_FUNC_1,
@@ -351,12 +517,12 @@ static struct gpiomux_setting pmic_suspended_cfg = {
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_NONE,
 };
-
+/* Luke Da80 use this GPIO for LCD RST , mot camera--Taylor--merge BSP3134
 static struct gpiomux_setting cam_active_1_cfg = {
 	.func = GPIOMUX_FUNC_1,
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_NONE,
-};
+};*/
 
 static struct gpiomux_setting cam_active_2_cfg = {
 	.func = GPIOMUX_FUNC_GPIO,
@@ -370,11 +536,11 @@ static struct gpiomux_setting cam_active_3_cfg = {
 	.pull = GPIOMUX_PULL_UP,
 };
 
-static struct gpiomux_setting cam_active_4_cfg = {
+/* static struct gpiomux_setting cam_active_4_cfg = {
 	.func = GPIOMUX_FUNC_GPIO,
 	.drv = GPIOMUX_DRV_2MA,
 	.pull = GPIOMUX_PULL_DOWN,
-};
+}; */
 
 static struct gpiomux_setting cam_active_5_cfg = {
 	.func = GPIOMUX_FUNC_1,
@@ -445,21 +611,488 @@ static struct gpiomux_setting mdm2ap_vddmin_suspend_cfg = {
 	.pull = GPIOMUX_PULL_NONE,
 };
 
-static struct msm_gpiomux_config msm8x60_gsbi_configs[] __initdata = {
+static struct msm_gpiomux_config msm8x60_cci_empty_configs[] __initdata = {
 	{
-		.gpio      = 33,
+		.gpio = 2,
 		.settings = {
-			[GPIOMUX_SUSPENDED] = &spi_suspended_config,
-			[GPIOMUX_ACTIVE]    = &spi_active,
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
 		},
 	},
+	{
+		.gpio = 3,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 4,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 5,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 6,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 7,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 8,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 9,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 10,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 11,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 12,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 13,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 14,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 15,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 16,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 17,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 18,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 19,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 20,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 21,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 22,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 23,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 24,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 25,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 26,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 27,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 58,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 63,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 69,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 70,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 75,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 83,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 85,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 93,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 94,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 95,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 97,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 98,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 100,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 101,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 102,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 103,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 105,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 106,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 107,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 134,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 143,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 145,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 146,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 147,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 148,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 149,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 150,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 151,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 154,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 155,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 156,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 157,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio = 158,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+};
+
+// added by yafi-begin
+static struct msm_gpiomux_config msm8x60_smb137b_configs[] __initdata = {
+	{
+		.gpio      = 152,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &smb137b_actv_cfg,
+			[GPIOMUX_SUSPENDED] = &smb137b_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 31,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &smb137b_stat_actv_cfg,
+			[GPIOMUX_SUSPENDED] = &smb137b_stat_susp_cfg,
+		},
+	},
+};
+
+static struct msm_gpiomux_config msm8x60_bq27520_configs[] __initdata = {
+	{
+		.gpio      = 126,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &bq27520_socint_actv_cfg,
+			[GPIOMUX_SUSPENDED] = &bq27520_socint_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 129,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &bq27520_batlow_actv_cfg,
+			[GPIOMUX_SUSPENDED] = &bq27520_batlow_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 144,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &bq27520_batgd_actv_cfg,
+			[GPIOMUX_SUSPENDED] = &bq27520_batgd_susp_cfg,
+		},
+	},
+};
+// added by yafi-end
+
+//henry add
+static struct msm_gpiomux_config msm8x60_keypad_configs[] __initdata = {
 	{
 		.gpio      = 34,
 		.settings = {
-			[GPIOMUX_SUSPENDED] = &spi_suspended_config,
-			[GPIOMUX_ACTIVE]    = &spi_active,
+			[GPIOMUX_ACTIVE]    = &mute_key_actv_cfg,
+			[GPIOMUX_SUSPENDED] = &mute_key_susp_cfg,
 		},
 	},
+	{
+		.gpio      = 96,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &volume_key_actv_cfg,
+			[GPIOMUX_SUSPENDED] = &volume_key_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 99,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &volume_key_susp_cfg,
+			[GPIOMUX_SUSPENDED] = &volume_key_susp_cfg,
+		},
+	},
+
+};
+
+
+static struct msm_gpiomux_config msm8x60_gsbi_configs[] __initdata = {
+
+//B: Robert, 20110831, QCT8x60_CR761 : Initial GPIO for power saving
+	{
+		.gpio      = 33,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 41,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 42,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	//B: Robert, 20110830, QCT8x60_CR759 : Remove NFC features for Baidu branch
+	{
+		.gpio      = 43,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 44,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	//E: Robert, 20110830, QCT8x60_CR759
+	{
+		.gpio      = 136,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 137,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+	{
+		.gpio      = 138,
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &cci_empty_susp_cfg,
+		},
+	},
+//E: Robert, 20110831, QCT8x60_CR761
+	
 	{
 		.gpio      = 35,
 		.settings = {
@@ -472,20 +1105,6 @@ static struct msm_gpiomux_config msm8x60_gsbi_configs[] __initdata = {
 		.settings = {
 			[GPIOMUX_SUSPENDED] = &spi_suspended_config,
 			[GPIOMUX_ACTIVE]    = &spi_active,
-		},
-	},
-	{
-		.gpio      = 43,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &i2c_suspended_config,
-			[GPIOMUX_ACTIVE]    = &i2c_active,
-		},
-	},
-	{
-		.gpio      = 44,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &i2c_suspended_config,
-			[GPIOMUX_ACTIVE]    = &i2c_active,
 		},
 	},
 	{
@@ -562,27 +1181,10 @@ static struct msm_gpiomux_config msm8x60_ebi2_configs[] __initdata = {
 		},
 	},
 	{
+
 		.gpio      = 123,
 		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 124,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 125,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 126,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
+			[GPIOMUX_SUSPENDED] = &bt_io_cfg,//&ebi2_a_d, <---Bruno, for WIFI
 		},
 	},
 	{
@@ -598,15 +1200,9 @@ static struct msm_gpiomux_config msm8x60_ebi2_configs[] __initdata = {
 		},
 	},
 	{
-		.gpio      = 129,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
 		.gpio      = 130,
 		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
+			[GPIOMUX_SUSPENDED] = &bt_io_cfg,//&ebi2_a_d, <---Bruno, for WIFI
 		},
 	},
 #if defined(CONFIG_USB_PEHCI_HCD) || defined(CONFIG_USB_PEHCI_HCD_MODULE)
@@ -622,120 +1218,6 @@ static struct msm_gpiomux_config msm8x60_ebi2_configs[] __initdata = {
 		.gpio      = 133,
 		.settings = {
 			[GPIOMUX_SUSPENDED] = &ebi2_cs3,
-		},
-	},
-	{
-		.gpio      = 135,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 136,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 137,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 138,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 139,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 140,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 141,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 142,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 143,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 144,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 145,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 146,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 147,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 148,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 149,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 150,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_a_d,
-		},
-	},
-	{
-		.gpio      = 151,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_oe,
-		},
-	},
-	{
-		.gpio      = 153,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_adv,
-		},
-	},
-	{
-		.gpio      = 157,
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &ebi2_we,
 		},
 	},
 };
@@ -839,10 +1321,17 @@ static struct msm_gpiomux_config msm8x60_charm_uart_configs[] __initdata = {
 
 static struct msm_gpiomux_config msm8x60_ts_configs[] __initdata = {
 	{
-		/* TS_ATTN */
-		.gpio = 58,
+		// Bato disable this because CCI do not use this GPIO and defined at other place
+		},
+};
+//henry
+static struct msm_gpiomux_config msm8x60_mxt224_touch_configs[] __initdata = {
+	{
+		/* TS_INTERRUPT */
+		.gpio = 61,
 		.settings = {
-			[GPIOMUX_SUSPENDED] = &ts_suspended,
+			[GPIOMUX_ACTIVE] = &mxt224_touch_active,
+			[GPIOMUX_SUSPENDED] = &mxt224_touch_suspended,
 		},
 	},
 };
@@ -990,6 +1479,7 @@ static struct msm_gpiomux_config msm8x60_charm_sdc_configs[] __initdata = {
 			[GPIOMUX_SUSPENDED] = &sdcc5_suspend_config,
 		},
 	},
+// henry: this is not volume-up key
 	/* SDCC5 data[3]*/
 	{
 		.gpio = 96,
@@ -1014,6 +1504,7 @@ static struct msm_gpiomux_config msm8x60_charm_sdc_configs[] __initdata = {
 			[GPIOMUX_SUSPENDED] = &sdcc5_suspend_config,
 		},
 	},
+// henry: this is not volume-down key
 	/* SDCC5 data[1]*/
 	{
 		.gpio = 99,
@@ -1147,42 +1638,35 @@ static struct msm_gpiomux_config msm8x60_snd_configs[] __initdata = {
 	},
 };
 
-static struct msm_gpiomux_config msm8x60_mi2s_configs[] __initdata = {
-	/* MI2S WS */
+//Nick add for DA80_3134 20110914
+static struct msm_gpiomux_config msm8x60_headsetdetection_configs[] __initdata = {
 	{
-		.gpio = 101,
+		.gpio = 71,
 		.settings = {
-			[GPIOMUX_ACTIVE]    = &mi2s_active_cfg,
-			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
-		},
-	},
-	/* MI2S SCLK */
-	{
-		.gpio = 102,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &mi2s_active_cfg,
-			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
-		},
-	},
-	/* MI2S MCLK */
-	{
-		.gpio = 103,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &mi2s_active_cfg,
-			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
-		},
-	},
-	/* MI2S SD3 */
-	{
-		.gpio = 107,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &mi2s_active_cfg,
-			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
+			//nick modified for gpio avtive pull none 20110808
+			[GPIOMUX_ACTIVE]    = &sdcc2_suspend_config,
+			//nick modified end 20110808
+			[GPIOMUX_SUSPENDED]    = &sdcc2_suspend_config,
 		},
 	},
 };
+//Nick add end 20110914
+static struct msm_gpiomux_config msm8x60_mi2s_configs[] __initdata = {
+//Bato removed this because CCI do not use this and defined at other location
+};
 
 static struct msm_gpiomux_config msm8x60_lcdc_configs[] __initdata = {
+//B 2011/05/13 JiaHan_Li, Bug 89-[BSP][LED]LED can't be triggered correctly.
+#ifdef CONFIG_LEDS_TCA6507
+	/* led_enable */
+	{
+		.gpio = 0,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &led_active_cfg,
+			[GPIOMUX_SUSPENDED] = &led_suspend_cfg,
+		},
+	},
+#else
 	/* lcdc_pclk */
 	{
 		.gpio = 0,
@@ -1191,222 +1675,8 @@ static struct msm_gpiomux_config msm8x60_lcdc_configs[] __initdata = {
 			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
 		},
 	},
-	/* lcdc_hsync */
-	{
-		.gpio = 1,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_vsync */
-	{
-		.gpio = 2,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_den */
-	{
-		.gpio = 3,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_red7 */
-	{
-		.gpio = 4,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_red6 */
-	{
-		.gpio = 5,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_red5 */
-	{
-		.gpio = 6,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_red4 */
-	{
-		.gpio = 7,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_red3 */
-	{
-		.gpio = 8,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_red2 */
-	{
-		.gpio = 9,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_red1 */
-	{
-		.gpio = 10,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_red0 */
-	{
-		.gpio = 11,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_grn7 */
-	{
-		.gpio = 12,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_grn6 */
-	{
-		.gpio = 13,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_grn5 */
-	{
-		.gpio = 14,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_grn4 */
-	{
-		.gpio = 15,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_grn3 */
-	{
-		.gpio = 16,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_grn2 */
-	{
-		.gpio = 17,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_grn1 */
-	{
-		.gpio = 18,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_grn0 */
-	{
-		.gpio = 19,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_blu7 */
-	{
-		.gpio = 20,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_blu6 */
-	{
-		.gpio = 21,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_blu5 */
-	{
-		.gpio = 22,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_blu4 */
-	{
-		.gpio = 23,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_blu3 */
-	{
-		.gpio = 24,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_blu2 */
-	{
-		.gpio = 25,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_blu1 */
-	{
-		.gpio = 26,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
-	/* lcdc_blu0 */
-	{
-		.gpio = 27,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &lcdc_active_cfg,
-			[GPIOMUX_SUSPENDED] = &lcdc_suspend_cfg,
-		},
-	},
+#endif
+//E 2011/05/13 JiaHan_Li, Bug 89-[BSP][LED]LED can't be triggered correctly.
 };
 
 static struct msm_gpiomux_config msm8x60_mdp_vsync_configs[] __initdata = {
@@ -1498,17 +1768,11 @@ static struct msm_gpiomux_config msm8x60_cam_configs[] __initdata = {
 			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
 		},
 	},
+// Luke Tuning GPIO setting
 	{
-		.gpio = 30,
+		.gpio = 1,
 		.settings = {
-			[GPIOMUX_ACTIVE]    = &cam_active_1_cfg,
-			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
-		},
-	},
-	{
-		.gpio = 31,
-		.settings = {
-			[GPIOMUX_ACTIVE]    = &cam_active_2_cfg,
+			[GPIOMUX_ACTIVE]    = &cam_active_5_cfg,
 			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
 		},
 	},
@@ -1516,14 +1780,57 @@ static struct msm_gpiomux_config msm8x60_cam_configs[] __initdata = {
 		.gpio = 32,
 		.settings = {
 			[GPIOMUX_ACTIVE]    = &cam_active_5_cfg,
+		        // Bug 901, Luke GPIO tuning
+			//[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
+			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg_cci,
+		},
+	},
+	{
+		.gpio = 47,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &cam_active_3_cfg,
 			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
 		},
 	},
 	{
-		.gpio = 42,
+		.gpio = 48,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &cam_active_3_cfg,
+			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
+		},
+	},
+    /*B [bug390] refine the gpio setting usage, CCI 20110704 */
+	{
+		.gpio = 104,
 		.settings = {
 			[GPIOMUX_ACTIVE]    = &cam_active_2_cfg,
 			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
+		},
+	},
+	{
+		.gpio = 45,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &cam_active_2_cfg,
+			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
+		},
+	},
+	{
+		.gpio = 46,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &cam_active_2_cfg,
+			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
+		},
+	},
+    /*E [bug390] refine the gpio setting usage, CCI 20110704 */
+};
+/* kibuuka : this is subject to restore -  static struct msm_gpiomux_config msm_qt_cam_configs[] __initdata = {
+	{
+		.gpio = 32,
+		.settings = {
+			[GPIOMUX_ACTIVE]    = &cam_active_5_cfg,
+		        // Bug 901, Luke GPIO tuning
+			//[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
+			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg_cci,
 		},
 	},
 	{
@@ -1554,7 +1861,7 @@ static struct msm_gpiomux_config msm8x60_cam_configs[] __initdata = {
 			[GPIOMUX_SUSPENDED] = &cam_suspend_cfg,
 		},
 	},
-};
+}; */
 
 static struct msm_gpiomux_config msm8x60_charm_configs[] __initdata = {
 	/* AP2MDM_WAKEUP */
@@ -1625,6 +1932,17 @@ static struct msm_gpiomux_config msm8x60_charm_configs[] __initdata = {
 
 struct msm_gpiomux_configs
 msm8x60_surf_ffa_gpiomux_cfgs[] __initdata = {
+// added by yafi-begin
+#if defined(ORG_VER)
+#else
+	{msm8x60_smb137b_configs, ARRAY_SIZE(msm8x60_smb137b_configs)},
+	{msm8x60_bq27520_configs, ARRAY_SIZE(msm8x60_bq27520_configs)},
+#endif
+// added by yafi-end
+#if 1   //henry
+	{msm8x60_keypad_configs, ARRAY_SIZE(msm8x60_keypad_configs)},
+	{msm8x60_mxt224_touch_configs, ARRAY_SIZE(msm8x60_mxt224_touch_configs)},
+#endif
 	{msm8x60_gsbi_configs, ARRAY_SIZE(msm8x60_gsbi_configs)},
 	{msm8x60_ebi2_configs, ARRAY_SIZE(msm8x60_ebi2_configs)},
 	{msm8x60_uart_configs, ARRAY_SIZE(msm8x60_uart_configs)},
@@ -1642,7 +1960,15 @@ msm8x60_surf_ffa_gpiomux_cfgs[] __initdata = {
 	{msm8x60_pmic_configs, ARRAY_SIZE(msm8x60_pmic_configs)},
 	{msm8x60_common_configs, ARRAY_SIZE(msm8x60_common_configs)},
 	{msm8x60_cam_configs, ARRAY_SIZE(msm8x60_cam_configs)},
+#if 0   //henry mask, conflict msm8x60_mxt224_touch_configs
 	{msm8x60_tmg200_configs, ARRAY_SIZE(msm8x60_tmg200_configs)},
+#endif
+//Nick add for DA80_3134 20110914
+	{msm8x60_headsetdetection_configs, ARRAY_SIZE(msm8x60_headsetdetection_configs)},
+//Nick add end 20110914
+#if 1 //add by Bato to config empty pins
+	{msm8x60_cci_empty_configs, ARRAY_SIZE(msm8x60_cci_empty_configs)},
+#endif
 	{NULL, 0},
 };
 

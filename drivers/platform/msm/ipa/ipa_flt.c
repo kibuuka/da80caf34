@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -44,17 +44,22 @@ static int ipa_generate_flt_hw_rule(enum ipa_ip_type ip,
 	const struct ipa_flt_rule *rule =
 		(const struct ipa_flt_rule *)&entry->rule;
 	u16 en_rule = 0;
-	u8 tmp[IPA_RT_FLT_HW_RULE_BUF_SIZE];
+	u32 tmp[IPA_RT_FLT_HW_RULE_BUF_SIZE/4];
 	u8 *start;
 
-	memset(tmp, 0, IPA_RT_FLT_HW_RULE_BUF_SIZE);
-	if (buf == NULL)
-		buf = tmp;
+	if (buf == NULL) {
+		memset(tmp, 0, IPA_RT_FLT_HW_RULE_BUF_SIZE);
+		buf = (u8 *)tmp;
+	}
 
 	start = buf;
 	hdr = (struct ipa_flt_rule_hw_hdr *)buf;
 	hdr->u.hdr.action = entry->rule.action;
-	hdr->u.hdr.rt_tbl_idx = entry->rt_tbl->idx;
+	if (entry->rt_tbl)
+		hdr->u.hdr.rt_tbl_idx = entry->rt_tbl->idx;
+	else
+		/* for excp action flt rules, rt tbl index is meaningless */
+		hdr->u.hdr.rt_tbl_idx = 0;
 	hdr->u.hdr.rsvd = 0;
 	buf += sizeof(struct ipa_flt_rule_hw_hdr);
 
@@ -363,6 +368,7 @@ int ipa_generate_flt_hw_tbl(enum ipa_ip_type ip, struct ipa_mem_buffer *mem)
 	return 0;
 proc_err:
 	dma_free_coherent(NULL, mem->size, mem->base, mem->phys_base);
+	mem->base = NULL;
 error:
 
 	return -EPERM;
@@ -451,7 +457,7 @@ static int __ipa_commit_flt(enum ipa_ip_type ip)
 
 	if (mem->size > avail) {
 		IPAERR("tbl too big, needed %d avail %d\n", mem->size, avail);
-		goto fail_hw_tbl_gen;
+		goto fail_send_cmd;
 	}
 
 	if (ip == IPA_IP_v4) {
@@ -504,19 +510,23 @@ static int __ipa_add_flt_rule(struct ipa_flt_tbl *tbl, enum ipa_ip_type ip,
 	struct ipa_flt_entry *entry;
 	struct ipa_tree_node *node;
 
-	if (!rule->rt_tbl_hdl) {
-		IPAERR("flt rule does not point to valid RT tbl\n");
-		goto error;
-	}
+	if (rule->action != IPA_PASS_TO_EXCEPTION) {
+		if (!rule->rt_tbl_hdl) {
+			IPAERR("flt rule does not point to valid RT tbl\n");
+			goto error;
+		}
 
-	if (ipa_search(&ipa_ctx->rt_tbl_hdl_tree, rule->rt_tbl_hdl) == NULL) {
-		IPAERR("RT tbl not found\n");
-		goto error;
-	}
+		if (ipa_search(&ipa_ctx->rt_tbl_hdl_tree,
+					rule->rt_tbl_hdl) == NULL) {
+			IPAERR("RT tbl not found\n");
+			goto error;
+		}
 
-	if (((struct ipa_rt_tbl *)rule->rt_tbl_hdl)->cookie != IPA_COOKIE) {
-		IPAERR("flt rule cookie is invalid\n");
-		goto error;
+		if (((struct ipa_rt_tbl *)rule->rt_tbl_hdl)->cookie !=
+				IPA_COOKIE) {
+			IPAERR("RT table cookie is invalid\n");
+			goto error;
+		}
 	}
 
 	node = kmem_cache_zalloc(ipa_ctx->tree_node_cache, GFP_KERNEL);
@@ -540,7 +550,8 @@ static int __ipa_add_flt_rule(struct ipa_flt_tbl *tbl, enum ipa_ip_type ip,
 	else
 		list_add(&entry->link, &tbl->head_flt_rule_list);
 	tbl->rule_cnt++;
-	entry->rt_tbl->ref_cnt++;
+	if (entry->rt_tbl)
+		entry->rt_tbl->ref_cnt++;
 	*rule_hdl = (u32)entry;
 	IPADBG("add flt rule rule_cnt=%d\n", tbl->rule_cnt);
 
@@ -564,20 +575,23 @@ static int __ipa_del_flt_rule(u32 rule_hdl)
 	struct ipa_flt_entry *entry = (struct ipa_flt_entry *)rule_hdl;
 	struct ipa_tree_node *node;
 
+	node = ipa_search(&ipa_ctx->flt_rule_hdl_tree, rule_hdl);
+	if (node == NULL) {
+		IPAERR("lookup failed\n");
+
+		return -EINVAL;
+	}
+
 	if (entry == NULL || (entry->cookie != IPA_COOKIE)) {
 		IPAERR("bad params\n");
 
 		return -EINVAL;
 	}
-	node = ipa_search(&ipa_ctx->flt_rule_hdl_tree, rule_hdl);
-	if (node == NULL) {
-		IPAERR("lookup failed\n");
 
-		return -EPERM;
-	}
 	list_del(&entry->link);
 	entry->tbl->rule_cnt--;
-	entry->rt_tbl->ref_cnt--;
+	if (entry->rt_tbl)
+		entry->rt_tbl->ref_cnt--;
 	IPADBG("del flt rule rule_cnt=%d\n", entry->tbl->rule_cnt);
 	entry->cookie = 0;
 	kmem_cache_free(ipa_ctx->flt_rule_cache, entry);
@@ -594,6 +608,12 @@ static int __ipa_add_global_flt_rule(enum ipa_ip_type ip,
 {
 	struct ipa_flt_tbl *tbl;
 
+	if (rule == NULL || rule_hdl == NULL) {
+		IPAERR("bad parms rule=%p rule_hdl=%p\n", rule, rule_hdl);
+
+		return -EINVAL;
+	}
+
 	tbl = &ipa_ctx->glob_flt_tbl[ip];
 	IPADBG("add global flt rule ip=%d\n", ip);
 
@@ -607,16 +627,16 @@ static int __ipa_add_ep_flt_rule(enum ipa_ip_type ip, enum ipa_client_type ep,
 	struct ipa_flt_tbl *tbl;
 	int ipa_ep_idx;
 
-	if (ip >= IPA_IP_MAX || rule == NULL || rule_hdl == NULL ||
-			ep >= IPA_CLIENT_MAX) {
-		IPAERR("bad parms\n");
+	if (rule == NULL || rule_hdl == NULL || ep >= IPA_CLIENT_MAX) {
+		IPAERR("bad parms rule=%p rule_hdl=%p ep=%d\n", rule,
+				rule_hdl, ep);
 
 		return -EINVAL;
 	}
 	ipa_ep_idx = ipa_get_ep_mapping(ipa_ctx->mode, ep);
 	if (ipa_ep_idx == IPA_FLT_TABLE_INDEX_NOT_FOUND ||
 				ipa_ctx->ep[ipa_ep_idx].valid == 0) {
-		IPAERR("bad parms\n");
+		IPAERR("ep not valid and/or connected ep_idx=%d\n", ipa_ep_idx);
 
 		return -EINVAL;
 	}
@@ -694,7 +714,6 @@ int ipa_del_flt_rule(struct ipa_ioc_del_flt_rule *hdls)
 
 	if (hdls == NULL || hdls->num_hdls == 0 || hdls->ip >= IPA_IP_MAX) {
 		IPAERR("bad parm\n");
-
 		return -EINVAL;
 	}
 
@@ -735,6 +754,11 @@ int ipa_commit_flt(enum ipa_ip_type ip)
 {
 	int result;
 
+	if (ip >= IPA_IP_MAX) {
+		IPAERR("bad parm\n");
+		return -EINVAL;
+	}
+
 	mutex_lock(&ipa_ctx->lock);
 
 	if (__ipa_commit_flt(ip)) {
@@ -767,6 +791,11 @@ int ipa_reset_flt(enum ipa_ip_type ip)
 	struct ipa_tree_node *node;
 	int i;
 
+	if (ip >= IPA_IP_MAX) {
+		IPAERR("bad parm\n");
+		return -EINVAL;
+	}
+
 	tbl = &ipa_ctx->glob_flt_tbl[ip];
 	mutex_lock(&ipa_ctx->lock);
 	IPADBG("reset flt ip=%d\n", ip);
@@ -774,9 +803,21 @@ int ipa_reset_flt(enum ipa_ip_type ip)
 		node = ipa_search(&ipa_ctx->flt_rule_hdl_tree, (u32)entry);
 		if (node == NULL)
 			WARN_ON(1);
+
+		if ((ip == IPA_IP_v4 &&
+		     entry->rule.attrib.attrib_mask == IPA_FLT_PROTOCOL &&
+		     entry->rule.attrib.u.v4.protocol ==
+		      IPA_INVALID_L4_PROTOCOL) ||
+		    (ip == IPA_IP_v6 &&
+		     entry->rule.attrib.attrib_mask == IPA_FLT_NEXT_HDR &&
+		     entry->rule.attrib.u.v6.next_hdr ==
+		      IPA_INVALID_L4_PROTOCOL))
+			continue;
+
 		list_del(&entry->link);
 		entry->tbl->rule_cnt--;
-		entry->rt_tbl->ref_cnt--;
+		if (entry->rt_tbl)
+			entry->rt_tbl->ref_cnt--;
 		entry->cookie = 0;
 		kmem_cache_free(ipa_ctx->flt_rule_cache, entry);
 
@@ -795,7 +836,8 @@ int ipa_reset_flt(enum ipa_ip_type ip)
 				WARN_ON(1);
 			list_del(&entry->link);
 			entry->tbl->rule_cnt--;
-			entry->rt_tbl->ref_cnt--;
+			if (entry->rt_tbl)
+				entry->rt_tbl->ref_cnt--;
 			entry->cookie = 0;
 			kmem_cache_free(ipa_ctx->flt_rule_cache, entry);
 

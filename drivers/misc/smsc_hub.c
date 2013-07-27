@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -471,7 +471,8 @@ static int smsc_hub_remove(struct platform_device *pdev)
 	}
 	pm_runtime_disable(&pdev->dev);
 
-	regulator_disable(smsc_hub->hub_vbus_reg);
+	if (!IS_ERR(smsc_hub->hub_vbus_reg))
+		regulator_disable(smsc_hub->hub_vbus_reg);
 	msm_hsic_hub_init_gpio(smsc_hub, 0);
 	msm_hsic_hub_init_clock(smsc_hub, 0);
 	msm_hsic_hub_init_vdd(smsc_hub, 0);
@@ -491,9 +492,7 @@ static int smsc_hub_lpm_enter(struct device *dev)
 {
 	int ret = 0;
 
-	if (!IS_ERR(smsc_hub->ref_clk)) {
-		clk_disable_unprepare(smsc_hub->ref_clk);
-	} else {
+	if (smsc_hub->xo_handle) {
 		ret = msm_xo_mode_vote(smsc_hub->xo_handle, MSM_XO_MODE_OFF);
 		if (ret) {
 			pr_err("%s: failed to devote for TCXO\n"
@@ -507,9 +506,7 @@ static int smsc_hub_lpm_exit(struct device *dev)
 {
 	int ret = 0;
 
-	if (!IS_ERR(smsc_hub->ref_clk)) {
-		clk_prepare_enable(smsc_hub->ref_clk);
-	} else {
+	if (smsc_hub->xo_handle) {
 		ret = msm_xo_mode_vote(smsc_hub->xo_handle, MSM_XO_MODE_ON);
 		if (ret) {
 			pr_err("%s: failed to vote for TCXO\n"

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -13,7 +13,6 @@
 #define __Q6_ASM_V2_H__
 
 #include <mach/qdsp6v2/apr.h>
-#include <mach/msm_subsystem_map.h>
 #include <sound/apr_audio-v2.h>
 #include <linux/list.h>
 #include <linux/msm_ion.h>
@@ -42,6 +41,8 @@
 #define FORMAT_AMR_WB_PLUS  0x0010
 #define FORMAT_MPEG4_MULTI_AAC 0x0011
 #define FORMAT_MULTI_CHANNEL_LINEAR_PCM 0x0012
+#define FORMAT_AC3          0x0013
+#define FORMAT_EAC3         0x0014
 
 #define ENCDEC_SBCBITRATE   0x0001
 #define ENCDEC_IMMEDIATE_DECODE 0x0002
@@ -69,7 +70,6 @@
 #define COMPRESSED_IO	0x0040
 #define NT_MODE        0x0400
 
-
 #define NO_TIMESTAMP    0xFF00
 #define SET_TIMESTAMP   0x0000
 
@@ -77,6 +77,19 @@
 #define SOFT_PAUSE_DISABLE	0
 
 #define SESSION_MAX	0x08
+
+/* payload structure bytes */
+#define READDONE_IDX_STATUS 0
+#define READDONE_IDX_BUFADD_LSW 1
+#define READDONE_IDX_BUFADD_MSW 2
+#define READDONE_IDX_MEMMAP_HDL 3
+#define READDONE_IDX_SIZE 4
+#define READDONE_IDX_OFFSET 5
+#define READDONE_IDX_LSW_TS 6
+#define READDONE_IDX_MSW_TS 7
+#define READDONE_IDX_FLAGS 8
+#define READDONE_IDX_NUMFRAMES 9
+#define READDONE_IDX_SEQ_ID 10
 
 #define SOFT_PAUSE_PERIOD       30   /* ramp up/down for 30ms    */
 #define SOFT_PAUSE_STEP         2000 /* Step value 2ms or 2000us */
@@ -139,7 +152,7 @@ struct audio_client {
 	app_cb		       cb;
 	atomic_t	       cmd_state;
 	/* Relative or absolute TS */
-	uint32_t	       time_flag;
+	atomic_t	       time_flag;
 	atomic_t	       nowait_cmd_cnt;
 	void		       *priv;
 	uint32_t               io_mode;
@@ -150,6 +163,10 @@ struct audio_client {
 	/* idx:1 out port, 0: in port*/
 	struct audio_port_data port[2];
 	wait_queue_head_t      cmd_wait;
+	wait_queue_head_t      time_wait;
+	bool                   perf_mode;
+	/* audio cache operations fptr*/
+	int (*fptr_cache_ops)(struct audio_buffer *abuff, int cache_op);
 };
 
 void q6asm_audio_client_free(struct audio_client *ac);
@@ -176,6 +193,9 @@ int q6asm_open_read(struct audio_client *ac, uint32_t format
 
 int q6asm_open_write(struct audio_client *ac, uint32_t format
 		/*, uint16_t bits_per_sample*/);
+
+int q6asm_open_write_v2(struct audio_client *ac, uint32_t format,
+			uint16_t bits_per_sample);
 
 int q6asm_open_read_write(struct audio_client *ac,
 			uint32_t rd_format,
@@ -244,6 +264,8 @@ int q6asm_enable_sbrps(struct audio_client *ac,
 int q6asm_cfg_dual_mono_aac(struct audio_client *ac,
 			uint16_t sce_left, uint16_t sce_right);
 
+int q6asm_cfg_aac_sel_mix_coef(struct audio_client *ac, uint32_t mix_coeff);
+
 int q6asm_enc_cfg_blk_qcelp(struct audio_client *ac, uint32_t frames_per_buf,
 		uint16_t min_rate, uint16_t max_rate,
 		uint16_t reduced_rate_level, uint16_t rate_modulation_cmd);
@@ -261,8 +283,19 @@ int q6asm_enc_cfg_blk_amrwb(struct audio_client *ac, uint32_t frames_per_buf,
 int q6asm_media_format_block_pcm(struct audio_client *ac,
 			uint32_t rate, uint32_t channels);
 
+int q6asm_media_format_block_pcm_format_support(struct audio_client *ac,
+			uint32_t rate, uint32_t channels,
+			uint16_t bits_per_sample);
+
 int q6asm_media_format_block_multi_ch_pcm(struct audio_client *ac,
-				uint32_t rate, uint32_t channels);
+			uint32_t rate, uint32_t channels,
+			bool use_default_chmap, char *channel_map);
+
+int q6asm_media_format_block_multi_ch_pcm_v2(
+			struct audio_client *ac,
+			uint32_t rate, uint32_t channels,
+			bool use_default_chmap, char *channel_map,
+			uint16_t bits_per_sample);
 
 int q6asm_media_format_block_aac(struct audio_client *ac,
 			struct asm_aac_cfg *cfg);
@@ -275,6 +308,12 @@ int q6asm_media_format_block_wma(struct audio_client *ac,
 
 int q6asm_media_format_block_wmapro(struct audio_client *ac,
 			void *cfg);
+
+int q6asm_media_format_block_amrwbplus(struct audio_client *ac,
+			struct asm_amrwbplus_cfg *cfg);
+
+int q6asm_ds1_set_endp_params(struct audio_client *ac,
+				int param_id, int param_value);
 
 /* PP specific */
 int q6asm_equalizer(struct audio_client *ac, void *eq);
@@ -296,7 +335,7 @@ int q6asm_set_lrgain(struct audio_client *ac, int left_gain, int right_gain);
 /* Enable Mute/unmute flag */
 int q6asm_set_mute(struct audio_client *ac, int muteflag);
 
-uint64_t q6asm_get_session_time(struct audio_client *ac);
+int q6asm_get_session_time(struct audio_client *ac, uint64_t *tstamp);
 
 /* Client can set the IO mode to either AIO/SIO mode */
 int q6asm_set_io_mode(struct audio_client *ac, uint32_t mode);

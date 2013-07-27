@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -20,11 +20,11 @@
 #include <linux/dma-mapping.h>
 #include <linux/coresight.h>
 #include <linux/avtimer.h>
-#include <linux/ahci_platform.h>
 #include <mach/irqs-8064.h>
 #include <mach/board.h>
 #include <mach/msm_iomap.h>
 #include <mach/usbdiag.h>
+#include <mach/msm_serial_hs_lite.h>
 #include <mach/msm_sps.h>
 #include <mach/dma.h>
 #include <mach/msm_dsps.h>
@@ -41,6 +41,7 @@
 #include <mach/msm_rtb.h>
 #include <linux/msm_ion.h>
 #include "clock.h"
+#include "pm.h"
 #include "devices.h"
 #include "footswitch.h"
 #include "msm_watchdog.h"
@@ -49,9 +50,11 @@
 #include <mach/mpm.h>
 #include <mach/iommu_domains.h>
 #include <mach/msm_cache_dump.h>
+#include "pm.h"
 
 /* Address of GSBI blocks */
 #define MSM_GSBI1_PHYS		0x12440000
+#define MSM_GSBI2_PHYS		0x12480000
 #define MSM_GSBI3_PHYS		0x16200000
 #define MSM_GSBI4_PHYS		0x16300000
 #define MSM_GSBI5_PHYS		0x1A200000
@@ -60,7 +63,9 @@
 
 /* GSBI UART devices */
 #define MSM_UART1DM_PHYS	(MSM_GSBI1_PHYS + 0x10000)
+#define MSM_UART2DM_PHYS	(MSM_GSBI2_PHYS + 0x10000)
 #define MSM_UART3DM_PHYS	(MSM_GSBI3_PHYS + 0x40000)
+#define MSM_UART4DM_PHYS	(MSM_GSBI4_PHYS + 0x40000)
 #define MSM_UART5DM_PHYS	(MSM_GSBI5_PHYS + 0x40000)
 #define MSM_UART6DM_PHYS	(MSM_GSBI6_PHYS + 0x40000)
 #define MSM_UART7DM_PHYS	(MSM_GSBI7_PHYS + 0x40000)
@@ -117,11 +122,37 @@ static struct resource msm8064_resources_pccntr[] = {
 	},
 };
 
-struct platform_device msm8064_pc_cntr = {
-	.name		= "pc-cntr",
+static uint32_t msm_pm_cp15_regs[] = {0x4501, 0x5501, 0x6501, 0x7501, 0x0500};
+
+static struct msm_pm_init_data_type msm_pm_data = {
+	.retention_calls_tz = true,
+	.cp15_data.save_cp15 = true,
+	.cp15_data.qsb_pc_vdd = 0x98,
+	.cp15_data.reg_data = &msm_pm_cp15_regs[0],
+	.cp15_data.reg_saved_state_size = ARRAY_SIZE(msm_pm_cp15_regs),
+};
+
+struct platform_device msm8064_pm_8x60 = {
+	.name		= "pm-8x60",
 	.id		= -1,
 	.num_resources	= ARRAY_SIZE(msm8064_resources_pccntr),
 	.resource	= msm8064_resources_pccntr,
+	.dev = {
+		.platform_data = &msm_pm_data,
+	},
+};
+
+static struct msm_pm_sleep_status_data msm_pm_slp_sts_data = {
+	.base_addr = MSM_ACC0_BASE + 0x08,
+	.cpu_offset = MSM_ACC1_BASE - MSM_ACC0_BASE,
+	.mask = 1UL << 13,
+};
+struct platform_device msm8064_cpu_slp_status = {
+	.name		= "cpu_slp_status",
+	.id		= -1,
+	.dev = {
+		.platform_data = &msm_pm_slp_sts_data,
+	},
 };
 
 static struct msm_watchdog_pdata msm_watchdog_pdata = {
@@ -202,6 +233,38 @@ struct platform_device apq8064_device_uart_gsbi1 = {
 	.id	= 1,
 	.num_resources	= ARRAY_SIZE(resources_uart_gsbi1),
 	.resource	= resources_uart_gsbi1,
+};
+
+static struct resource resources_uart_gsbi2[] = {
+	{
+		.start	= APQ8064_GSBI2_UARTDM_IRQ,
+		.end	= APQ8064_GSBI2_UARTDM_IRQ,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= MSM_UART2DM_PHYS,
+		.end	= MSM_UART2DM_PHYS + PAGE_SIZE - 1,
+		.name	= "uartdm_resource",
+		.flags	= IORESOURCE_MEM,
+	},
+	{
+		.start	= MSM_GSBI2_PHYS,
+		.end	= MSM_GSBI2_PHYS + PAGE_SIZE - 1,
+		.name	= "gsbi_resource",
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static struct msm_serial_hslite_platform_data uart_gsbi2_pdata = {
+	.line		= 0,
+};
+
+struct platform_device apq8064_device_uart_gsbi2 = {
+	.name	= "msm_serial_hsl",
+	.id	= 3,
+	.num_resources	= ARRAY_SIZE(resources_uart_gsbi2),
+	.resource	= resources_uart_gsbi2,
+	.dev.platform_data = &uart_gsbi2_pdata,
 };
 
 static struct resource resources_uart_gsbi3[] = {
@@ -349,6 +412,38 @@ struct platform_device apq8064_device_qup_i2c_gsbi4 = {
 	.id		= 4,
 	.num_resources	= ARRAY_SIZE(resources_qup_i2c_gsbi4),
 	.resource	= resources_qup_i2c_gsbi4,
+};
+
+static struct resource resources_uart_gsbi4[] = {
+	{
+		.start	= GSBI4_UARTDM_IRQ,
+		.end	= GSBI4_UARTDM_IRQ,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= MSM_UART4DM_PHYS,
+		.end	= MSM_UART4DM_PHYS + PAGE_SIZE - 1,
+		.name	= "uartdm_resource",
+		.flags	= IORESOURCE_MEM,
+	},
+	{
+		.start	= MSM_GSBI4_PHYS,
+		.end	= MSM_GSBI4_PHYS + PAGE_SIZE - 1,
+		.name	= "gsbi_resource",
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static struct msm_serial_hslite_platform_data uart_gsbi4_pdata = {
+	.line		= 2,
+};
+
+struct platform_device apq8064_device_uart_gsbi4 = {
+	.name	= "msm_serial_hsl",
+	.id	= 4,
+	.num_resources	= ARRAY_SIZE(resources_uart_gsbi4),
+	.resource	= resources_uart_gsbi4,
+	.dev.platform_data = &uart_gsbi4_pdata,
 };
 
 static struct resource resources_qup_spi_gsbi5[] = {
@@ -755,26 +850,49 @@ static const struct msm_gpio tspp_gpios[] = {
 
 static struct resource tspp_resources[] = {
 	[0] = {
+		.name = "TSIF_TSPP_IRQ",
 		.flags = IORESOURCE_IRQ,
 		.start = TSIF_TSPP_IRQ,
-		.end   = TSIF1_IRQ,
+		.end   = TSIF_TSPP_IRQ,
 	},
 	[1] = {
+		.name = "TSIF0_IRQ",
+		.flags = IORESOURCE_IRQ,
+		.start = TSIF1_IRQ,
+		.end   = TSIF1_IRQ,
+	},
+	[2] = {
+		.name = "TSIF1_IRQ",
+		.flags = IORESOURCE_IRQ,
+		.start = TSIF2_IRQ,
+		.end   = TSIF2_IRQ,
+	},
+	[3] = {
+		.name = "TSIF_BAM_IRQ",
+		.flags = IORESOURCE_IRQ,
+		.start = TSIF_BAM_IRQ,
+		.end   = TSIF_BAM_IRQ,
+	},
+	[4] = {
+		.name = "MSM_TSIF0_PHYS",
 		.flags = IORESOURCE_MEM,
 		.start = MSM_TSIF0_PHYS,
 		.end   = MSM_TSIF0_PHYS + MSM_TSIF_SIZE - 1,
 	},
-	[2] = {
+	[5] = {
+		.name = "MSM_TSIF1_PHYS",
 		.flags = IORESOURCE_MEM,
 		.start = MSM_TSIF1_PHYS,
 		.end   = MSM_TSIF1_PHYS + MSM_TSIF_SIZE - 1,
 	},
-	[3] = {
+	[6] = {
+		.name = "MSM_TSPP_PHYS",
 		.flags = IORESOURCE_MEM,
 		.start = MSM_TSPP_PHYS,
 		.end   = MSM_TSPP_PHYS + MSM_TSPP_SIZE - 1,
 	},
-	[4] = {
+	[7] = {
+		.name = "MSM_TSPP_BAM_PHYS",
 		.flags = IORESOURCE_MEM,
 		.start = MSM_TSPP_BAM_PHYS,
 		.end   = MSM_TSPP_BAM_PHYS + MSM_TSPP_BAM_SIZE - 1,
@@ -786,6 +904,7 @@ static struct msm_tspp_platform_data tspp_platform_data = {
 	.gpios = tspp_gpios,
 	.tsif_pclk = "iface_clk",
 	.tsif_ref_clk = "ref_clk",
+	.tsif_vreg_present = 0,
 };
 
 struct platform_device msm_8064_device_tspp = {
@@ -1779,9 +1898,11 @@ int __init apq8064_add_sdcc(unsigned int controller,
 }
 
 #define MSM_SATA_AHCI_BASE	0x29000000
-#define MSM_SATA_AHCI_REGS_SZ	0x17C
+#define MSM_SATA_AHCI_REGS_SZ	0x180
+#define MSM_SATA_PHY_BASE	0x1B400000
+#define MSM_SATA_PHY_REGS_SZ	0x200
 
-static struct resource resources_ahci[] = {
+static struct resource resources_sata[] = {
 	{
 		.name	= "ahci_mem",
 		.flags	= IORESOURCE_MEM,
@@ -1794,31 +1915,25 @@ static struct resource resources_ahci[] = {
 		.start	= SATA_CONTROLLER_IRQ,
 		.end	= SATA_CONTROLLER_IRQ,
 	},
-};
-
-static u64 ahci_dma_mask = DMA_BIT_MASK(32);
-static struct platform_device apq8064_device_ahci = {
-	.name		= "ahci",
-	.id		= 0,
-	.num_resources	= ARRAY_SIZE(resources_ahci),
-	.resource	= resources_ahci,
-	.dev		= {
-		.dma_mask		= &ahci_dma_mask,
-		.coherent_dma_mask	= DMA_BIT_MASK(32),
+	{
+		.name	= "phy_mem",
+		.flags	= IORESOURCE_MEM,
+		.start	= MSM_SATA_PHY_BASE,
+		.end	= MSM_SATA_PHY_BASE + MSM_SATA_PHY_REGS_SZ - 1,
 	},
 };
 
-int __init apq8064_add_ahci(struct ahci_platform_data *platd)
-{
-	struct platform_device	*pdev;
-
-	if (!platd)
-		return -EINVAL;
-
-	pdev = &apq8064_device_ahci;
-	pdev->dev.platform_data = platd;
-	return platform_device_register(pdev);
-}
+static u64 sata_dma_mask = DMA_BIT_MASK(32);
+struct platform_device apq8064_device_sata = {
+	.name		= "msm_sata",
+	.id		= 0,
+	.num_resources	= ARRAY_SIZE(resources_sata),
+	.resource	= resources_sata,
+	.dev		= {
+		.dma_mask		= &sata_dma_mask,
+		.coherent_dma_mask	= DMA_BIT_MASK(32),
+	},
+};
 
 static struct resource resources_sps[] = {
 	{
@@ -2538,8 +2653,8 @@ static struct msm_rpm_log_platform_data msm_rpm_log_pdata = {
 		[MSM_RPM_LOG_PAGE_BUFFER]  = 0x000000A0,
 	},
 	.phys_size = SZ_8K,
-	.log_len = 4096,		  /* log's buffer length in bytes */
-	.log_len_mask = (4096 >> 2) - 1,  /* length mask in units of u32 */
+	.log_len = 6144,		  /* log's buffer length in bytes */
+	.log_len_mask = (6144 >> 2) - 1,  /* length mask in units of u32 */
 };
 
 struct platform_device apq8064_rpm_log_device = {
@@ -3040,6 +3155,7 @@ struct platform_device apq8064_device_cache_erp = {
 
 static struct resource coresight_funnel_resources[] = {
 	{
+		.name  = "funnel-base",
 		.start = CORESIGHT_FUNNEL_PHYS_BASE,
 		.end   = CORESIGHT_FUNNEL_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,
@@ -3072,6 +3188,7 @@ struct platform_device apq8064_coresight_funnel_device = {
 
 static struct resource coresight_etm2_resources[] = {
 	{
+		.name  = "etm-base",
 		.start = CORESIGHT_ETM2_PHYS_BASE,
 		.end   = CORESIGHT_ETM2_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,
@@ -3104,6 +3221,7 @@ struct platform_device coresight_etm2_device = {
 
 static struct resource coresight_etm3_resources[] = {
 	{
+		.name  = "etm-base",
 		.start = CORESIGHT_ETM3_PHYS_BASE,
 		.end   = CORESIGHT_ETM3_PHYS_BASE + SZ_4K - 1,
 		.flags = IORESOURCE_MEM,

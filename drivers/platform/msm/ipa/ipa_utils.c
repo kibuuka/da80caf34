@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -14,7 +14,6 @@
 #include <linux/genalloc.h>	/* gen_pool_alloc() */
 #include <linux/io.h>
 #include "ipa_i.h"
-
 static const int ipa_ofst_meq32[] = { IPA_OFFSET_MEQ32_0,
 					IPA_OFFSET_MEQ32_1, -1 };
 static const int ipa_ofst_meq128[] = { IPA_OFFSET_MEQ128_0,
@@ -33,6 +32,24 @@ static const int ep_mapping[IPA_MODE_MAX][IPA_CLIENT_MAX] = {
 	{ 19, -1, -1, -1, -1, 11, 15, 8, 6, 2, 1, 5, 14, 16, 17, 18, -1, 10, 9, 7, 3, 4 },
 };
 
+static unsigned int ipa_calc_pull_len(u32 hdr_len)
+{
+	unsigned int pull_len, padding;
+
+	pull_len = sizeof(struct ipa_a5_mux_hdr);
+
+	/*
+	 * IP packet starts on word boundary
+	 * remove the MUX header and any padding and pass the frame to
+	 * the client which registered a rx callback on the "src pipe"
+	 */
+	padding = hdr_len & 0x3;
+	if (padding)
+		pull_len += 4 - padding;
+
+	return pull_len;
+}
+
 /**
  * ipa_cfg_route() - configure IPA route
  * @route: IPA route
@@ -42,7 +59,12 @@ static const int ep_mapping[IPA_MODE_MAX][IPA_CLIENT_MAX] = {
  */
 int ipa_cfg_route(struct ipa_route *route)
 {
-	ipa_write_reg(ipa_ctx->mmio, IPA_ROUTE_OFST,
+	u32 ipa_route_offset = IPA_ROUTE_OFST_v1;
+
+	if (ipa_ctx->ipa_hw_type != IPA_HW_v1_0)
+		ipa_route_offset = IPA_ROUTE_OFST_v2;
+
+	ipa_write_reg(ipa_ctx->mmio, ipa_route_offset,
 		     IPA_SETFIELD(route->route_dis,
 				  IPA_ROUTE_ROUTE_DIS_SHFT,
 				  IPA_ROUTE_ROUTE_DIS_BMSK) |
@@ -67,10 +89,15 @@ int ipa_cfg_route(struct ipa_route *route)
  */
 int ipa_cfg_filter(u32 disable)
 {
-	ipa_write_reg(ipa_ctx->mmio, IPA_FILTER_OFST,
-		     IPA_SETFIELD(!disable,
-				  IPA_FILTER_FILTER_EN_SHFT,
-				  IPA_FILTER_FILTER_EN_BMSK));
+	u32 ipa_filter_ofst = IPA_FILTER_OFST_v1;
+
+	if (ipa_ctx->ipa_hw_type != IPA_HW_v1_0)
+		ipa_filter_ofst = IPA_FILTER_OFST_v2;
+	ipa_write_reg(ipa_ctx->mmio, ipa_filter_ofst,
+			IPA_SETFIELD(!disable,
+					IPA_FILTER_FILTER_EN_SHFT,
+					IPA_FILTER_FILTER_EN_BMSK));
+
 	return 0;
 }
 
@@ -110,6 +137,23 @@ int ipa_get_ep_mapping(enum ipa_operating_mode mode,
 		enum ipa_client_type client)
 {
 	return ep_mapping[mode][client];
+}
+
+/**
+ * ipa_get_client_mapping() - provide client mapping
+ * @mode: IPA operating mode
+ * @pipe_idx: IPA end-point number
+ *
+ * Return value: client mapping
+ */
+int ipa_get_client_mapping(enum ipa_operating_mode mode, int pipe_idx)
+{
+	int i;
+
+	for (i = 0; i < IPA_CLIENT_MAX; i++)
+		if (ep_mapping[mode][i] == pipe_idx)
+			break;
+	return i;
 }
 
 /**
@@ -654,10 +698,19 @@ int ipa_cfg_ep_nat(u32 clnt_hdl, const struct ipa_ep_cfg_nat *ipa_ep_cfg)
 	/* copy over EP cfg */
 	ipa_ctx->ep[clnt_hdl].cfg.nat = *ipa_ep_cfg;
 	/* clnt_hdl is used as pipe_index */
-	ipa_write_reg(ipa_ctx->mmio, IPA_ENDP_INIT_NAT_n_OFST(clnt_hdl),
-		      IPA_SETFIELD(ipa_ctx->ep[clnt_hdl].cfg.nat.nat_en,
-				   IPA_ENDP_INIT_NAT_n_NAT_EN_SHFT,
-				   IPA_ENDP_INIT_NAT_n_NAT_EN_BMSK));
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0)
+		ipa_write_reg(ipa_ctx->mmio,
+			      IPA_ENDP_INIT_NAT_n_OFST_v1(clnt_hdl),
+			      IPA_SETFIELD(ipa_ctx->ep[clnt_hdl].cfg.nat.nat_en,
+					   IPA_ENDP_INIT_NAT_n_NAT_EN_SHFT,
+					   IPA_ENDP_INIT_NAT_n_NAT_EN_BMSK));
+	else
+		ipa_write_reg(ipa_ctx->mmio,
+			      IPA_ENDP_INIT_NAT_n_OFST_v2(clnt_hdl),
+			      IPA_SETFIELD(ipa_ctx->ep[clnt_hdl].cfg.nat.nat_en,
+					   IPA_ENDP_INIT_NAT_n_NAT_EN_SHFT,
+					   IPA_ENDP_INIT_NAT_n_NAT_EN_BMSK));
+
 	return 0;
 }
 EXPORT_SYMBOL(ipa_cfg_ep_nat);
@@ -709,7 +762,15 @@ int ipa_cfg_ep_hdr(u32 clnt_hdl, const struct ipa_ep_cfg_hdr *ipa_ep_cfg)
 		   IPA_ENDP_INIT_HDR_n_HDR_A5_MUX_SHFT,
 		   IPA_ENDP_INIT_HDR_n_HDR_A5_MUX_BMSK);
 
-	ipa_write_reg(ipa_ctx->mmio, IPA_ENDP_INIT_HDR_n_OFST(clnt_hdl), val);
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0)
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_HDR_n_OFST_v1(clnt_hdl), val);
+	else
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_HDR_n_OFST_v2(clnt_hdl), val);
+
+	if (IPA_CLIENT_IS_PROD(ep->client))
+		ep->pull_len = ipa_calc_pull_len(ipa_ep_cfg->hdr_len);
 
 	return 0;
 }
@@ -727,6 +788,7 @@ EXPORT_SYMBOL(ipa_cfg_ep_hdr);
 int ipa_cfg_ep_mode(u32 clnt_hdl, const struct ipa_ep_cfg_mode *ipa_ep_cfg)
 {
 	u32 val;
+	int ep;
 
 	if (clnt_hdl >= IPA_NUM_PIPES || ipa_ctx->ep[clnt_hdl].valid == 0 ||
 			ipa_ep_cfg == NULL) {
@@ -739,10 +801,16 @@ int ipa_cfg_ep_mode(u32 clnt_hdl, const struct ipa_ep_cfg_mode *ipa_ep_cfg)
 		return -EINVAL;
 	}
 
+	ep = ipa_get_ep_mapping(ipa_ctx->mode, ipa_ep_cfg->dst);
+	if (ep == -1 && ipa_ep_cfg->mode == IPA_DMA) {
+		IPAERR("dst %d does not exist in mode %d\n", ipa_ep_cfg->dst,
+		       ipa_ctx->mode);
+		return -EINVAL;
+	}
+
 	/* copy over EP cfg */
 	ipa_ctx->ep[clnt_hdl].cfg.mode = *ipa_ep_cfg;
-	ipa_ctx->ep[clnt_hdl].dst_pipe_index = ipa_get_ep_mapping(ipa_ctx->mode,
-			ipa_ep_cfg->dst);
+	ipa_ctx->ep[clnt_hdl].dst_pipe_index = ep;
 
 	val = IPA_SETFIELD(ipa_ctx->ep[clnt_hdl].cfg.mode.mode,
 			   IPA_ENDP_INIT_MODE_n_MODE_SHFT,
@@ -751,7 +819,12 @@ int ipa_cfg_ep_mode(u32 clnt_hdl, const struct ipa_ep_cfg_mode *ipa_ep_cfg)
 			   IPA_ENDP_INIT_MODE_n_DEST_PIPE_INDEX_SHFT,
 			   IPA_ENDP_INIT_MODE_n_DEST_PIPE_INDEX_BMSK);
 
-	ipa_write_reg(ipa_ctx->mmio, IPA_ENDP_INIT_MODE_n_OFST(clnt_hdl), val);
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0)
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_MODE_n_OFST_v1(clnt_hdl), val);
+	else
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_MODE_n_OFST_v2(clnt_hdl), val);
 
 	return 0;
 }
@@ -791,7 +864,12 @@ int ipa_cfg_ep_aggr(u32 clnt_hdl, const struct ipa_ep_cfg_aggr *ipa_ep_cfg)
 			   IPA_ENDP_INIT_AGGR_n_AGGR_TIME_LIMIT_SHFT,
 			   IPA_ENDP_INIT_AGGR_n_AGGR_TIME_LIMIT_BMSK);
 
-	ipa_write_reg(ipa_ctx->mmio, IPA_ENDP_INIT_AGGR_n_OFST(clnt_hdl), val);
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0)
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_AGGR_n_OFST_v1(clnt_hdl), val);
+	else
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_AGGR_n_OFST_v2(clnt_hdl), val);
 
 	return 0;
 }
@@ -834,14 +912,90 @@ int ipa_cfg_ep_route(u32 clnt_hdl, const struct ipa_ep_cfg_route *ipa_ep_cfg)
 	/* always use the "default" routing tables whose indices are 0 */
 	ipa_ctx->ep[clnt_hdl].rt_tbl_idx = 0;
 
-	ipa_write_reg(ipa_ctx->mmio, IPA_ENDP_INIT_ROUTE_n_OFST(clnt_hdl),
-		      IPA_SETFIELD(ipa_ctx->ep[clnt_hdl].rt_tbl_idx,
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0) {
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_ROUTE_n_OFST_v1(clnt_hdl),
+			IPA_SETFIELD(ipa_ctx->ep[clnt_hdl].rt_tbl_idx,
 			   IPA_ENDP_INIT_ROUTE_n_ROUTE_TABLE_INDEX_SHFT,
 			   IPA_ENDP_INIT_ROUTE_n_ROUTE_TABLE_INDEX_BMSK));
+	} else {
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_ROUTE_n_OFST_v2(clnt_hdl),
+			IPA_SETFIELD(ipa_ctx->ep[clnt_hdl].rt_tbl_idx,
+			   IPA_ENDP_INIT_ROUTE_n_ROUTE_TABLE_INDEX_SHFT,
+			   IPA_ENDP_INIT_ROUTE_n_ROUTE_TABLE_INDEX_BMSK));
+	}
 
 	return 0;
 }
 EXPORT_SYMBOL(ipa_cfg_ep_route);
+
+/**
+ * ipa_cfg_ep_holb() - IPA end-point holb configuration
+ *
+ * If an IPA producer pipe is full, IPA HW by default will block
+ * indefinitely till space opens up. During this time no packets
+ * including those from unrelated pipes will be processed. Enabling
+ * HOLB means IPA HW will be allowed to drop packets as/when needed
+ * and indefinite blocking is avoided.
+ *
+ * @clnt_hdl:	[in] opaque client handle assigned by IPA to client
+ * @ipa_ep_cfg:	[in] IPA end-point configuration params
+ *
+ * Returns:	0 on success, negative on failure
+ */
+int ipa_cfg_ep_holb(u32 clnt_hdl, const struct ipa_ep_cfg_holb *ipa_ep_cfg)
+{
+	if (clnt_hdl >= IPA_NUM_PIPES || ipa_ctx->ep[clnt_hdl].valid == 0 ||
+			ipa_ep_cfg == NULL || ipa_ep_cfg->tmr_val > 511 ||
+			ipa_ep_cfg->en > 1) {
+		IPAERR("bad parm.\n");
+		return -EINVAL;
+	}
+
+	if (IPA_CLIENT_IS_PROD(ipa_ctx->ep[clnt_hdl].client)) {
+		IPAERR("HOLB does not apply to IPA in EP %d\n", clnt_hdl);
+		return -EINVAL;
+	}
+
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0) {
+		IPAERR("per EP HOLB not supported\n");
+		return -EPERM;
+	} else {
+		ipa_ctx->ep[clnt_hdl].holb = *ipa_ep_cfg;
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_HOL_BLOCK_EN_n_OFST(clnt_hdl),
+			ipa_ep_cfg->en);
+		ipa_write_reg(ipa_ctx->mmio,
+			IPA_ENDP_INIT_HOL_BLOCK_TIMER_n_OFST(clnt_hdl),
+			ipa_ep_cfg->tmr_val);
+		IPAERR("cfg holb %u ep=%d tmr=%d\n", ipa_ep_cfg->en, clnt_hdl,
+				ipa_ep_cfg->tmr_val);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(ipa_cfg_ep_holb);
+
+/**
+ * ipa_cfg_ep_holb_by_client() - IPA end-point holb configuration
+ *
+ * Wrapper function for ipa_cfg_ep_holb() with client name instead of
+ * client handle. This function is used for clients that does not have
+ * client handle.
+ *
+ * @client:	[in] client name
+ * @ipa_ep_cfg:	[in] IPA end-point configuration params
+ *
+ * Returns:	0 on success, negative on failure
+ */
+int ipa_cfg_ep_holb_by_client(enum ipa_client_type client,
+				const struct ipa_ep_cfg_holb *ipa_ep_cfg)
+{
+	return ipa_cfg_ep_holb(ipa_get_ep_mapping(ipa_ctx->mode, client),
+			       ipa_ep_cfg);
+}
+EXPORT_SYMBOL(ipa_cfg_ep_holb_by_client);
 
 /**
  * ipa_dump_buff_internal() - dumps buffer for debug purposes
@@ -899,206 +1053,6 @@ void ipa_dump(void)
 		dma_free_coherent(NULL, flt_mem.size, flt_mem.base,
 				flt_mem.phys_base);
 	mutex_unlock(&ipa_ctx->lock);
-}
-
-/*
- * TODO: add swap if needed, for now assume LE is ok for device memory
- * even though IPA registers are assumed to be BE
- */
-/**
- * ipa_write_dev_8() - writes 8 bit value
- * @val: value
- * @ofst_ipa_sram: address to write to
- */
-void ipa_write_dev_8(u8 val, u16 ofst_ipa_sram)
-{
-	iowrite8(val, (u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram);
-}
-
-/**
- * ipa_write_dev_16() - writes 16 bit value
- * @val: value
- * @ofst_ipa_sram: address to write to
- *
- */
-void ipa_write_dev_16(u16 val, u16 ofst_ipa_sram)
-{
-	iowrite16(val, (u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram);
-}
-
-/**
- * ipa_write_dev_32() - writes 32 bit value
- * @val: value
- * @ofst_ipa_sram: address to write to
- */
-void ipa_write_dev_32(u32 val, u16 ofst_ipa_sram)
-{
-	iowrite32(val, (u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram);
-}
-
-/**
- * ipa_read_dev_8() - reads 8 bit value
- * @ofst_ipa_sram: address to read from
- *
- * Return value: value read
- */
-unsigned int ipa_read_dev_8(u16 ofst_ipa_sram)
-{
-	return ioread8((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram);
-}
-
-/**
- * ipa_read_dev_16() - reads 16 bit value
- * @ofst_ipa_sram: address to read from
- *
- * Return value: value read
- */
-unsigned int ipa_read_dev_16(u16 ofst_ipa_sram)
-{
-	return ioread16((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram);
-}
-
-/**
- * ipa_read_dev_32() - reads 32 bit value
- * @ofst_ipa_sram: address to read from
- *
- * Return value: value read
- */
-unsigned int ipa_read_dev_32(u16 ofst_ipa_sram)
-{
-	return ioread32((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram);
-}
-
-/**
- * ipa_write_dev_8rep() - writes 8 bit value
- * @val: value
- * @ofst_ipa_sram: address to write to
- * @count: num of bytes to write
- */
-void ipa_write_dev_8rep(u16 ofst_ipa_sram, const void *buf, unsigned long count)
-{
-	iowrite8_rep((void *)((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram), buf,
-			count);
-}
-
-/**
- * ipa_write_dev_16rep() - writes 16 bit value
- * @val: value
- * @ofst_ipa_sram: address to write to
- * @count: num of bytes to write
- */
-void ipa_write_dev_16rep(u16 ofst_ipa_sram, const void *buf,
-		unsigned long count)
-{
-	iowrite16_rep((void *)((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram),
-			buf, count);
-}
-
-/**
- * ipa_write_dev_32rep() - writes 32 bit value
- * @val: value
- * @ofst_ipa_sram: address to write to
- * @count: num of bytes to write
- */
-void ipa_write_dev_32rep(u16 ofst_ipa_sram, const void *buf,
-		unsigned long count)
-{
-	iowrite32_rep((void *)((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram),
-			buf, count);
-}
-
-/**
- * ipa_read_dev_8rep() - reads 8 bit value
- * @ofst_ipa_sram: address to read from
- * @buf: buffer to read to
- * @count: number of bytes to read
- */
-void ipa_read_dev_8rep(u16 ofst_ipa_sram, void *buf, unsigned long count)
-{
-	ioread8_rep((void *)((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram), buf,
-			count);
-}
-
-/**
- * ipa_read_dev_16rep() - reads 16 bit value
- * @ofst_ipa_sram: address to read from
- * @buf: buffer to read to
- * @count: number of bytes to read
- */
-void ipa_read_dev_16rep(u16 ofst_ipa_sram, void *buf, unsigned long count)
-{
-	ioread16_rep((void *)((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram), buf,
-			count);
-}
-
-/**
- * ipa_read_dev_32rep() - reads 32 bit value
- * @ofst_ipa_sram: address to read from
- * @buf: buffer to read to
- * @count: number of bytes to read
- */
-void ipa_read_dev_32rep(u16 ofst_ipa_sram, void *buf, unsigned long count)
-{
-	ioread32_rep((void *)((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram), buf,
-			count);
-}
-
-/**
- * ipa_memset_dev() - memset IO
- * @ofst_ipa_sram: address to set
- * @value: value
- * @count: number of bytes to set
- */
-void ipa_memset_dev(u16 ofst_ipa_sram, u8 value, unsigned int count)
-{
-	memset_io((void *)((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram), value,
-			count);
-}
-
-/**
- * ipa_memcpy_from_dev() - copy memory from device
- * @dest: buffer to copy to
- * @ofst_ipa_sram: address
- * @count: number of bytes to copy
- */
-void ipa_memcpy_from_dev(void *dest, u16 ofst_ipa_sram, unsigned int count)
-{
-	memcpy_fromio(dest, (void *)((u32)ipa_ctx->mmio + 0x4000 +
-				ofst_ipa_sram), count);
-}
-
-/**
- * ipa_memcpy_to_dev() - copy memory to device
- * @ofst_ipa_sram: address
- * @source: buffer to copy from
- * @count: number of bytes to copy
- */
-void ipa_memcpy_to_dev(u16 ofst_ipa_sram, void *source, unsigned int count)
-{
-	memcpy_toio((void *)((u32)ipa_ctx->mmio + 0x4000 + ofst_ipa_sram),
-			source, count);
-}
-
-/**
- * ipa_defrag() - handle de-frag for bridging type of cases
- * @skb: skb
- *
- * Return value:
- * 0: success
- */
-int ipa_defrag(struct sk_buff *skb)
-{
-	/*
-	 * Reassemble IP fragments. TODO: need to setup network_header to
-	 * point to start of IP header
-	 */
-	if (ip_hdr(skb)->frag_off & htons(IP_MF | IP_OFFSET)) {
-		if (ip_defrag(skb, IP_DEFRAG_CONNTRACK_IN))
-			return -EINPROGRESS;
-	}
-
-	/* skb is not fully assembled, send it back out */
-	return 0;
 }
 
 /**
@@ -1267,11 +1221,21 @@ int ipa_pipe_mem_free(u32 ofst, u32 size)
 int ipa_set_aggr_mode(enum ipa_aggr_mode mode)
 {
 	u32 reg_val;
-	reg_val = ipa_read_reg(ipa_ctx->mmio, IPA_AGGREGATION_SPARE_REG_2_OFST);
-	ipa_write_reg(ipa_ctx->mmio, IPA_AGGREGATION_SPARE_REG_2_OFST,
-			((mode & IPA_AGGREGATION_MODE_MSK) <<
-				IPA_AGGREGATION_MODE_SHFT) |
-			(reg_val & IPA_AGGREGATION_MODE_BMSK));
+
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0) {
+		reg_val = ipa_read_reg(ipa_ctx->mmio,
+				IPA_AGGREGATION_SPARE_REG_2_OFST);
+		ipa_write_reg(ipa_ctx->mmio,
+				IPA_AGGREGATION_SPARE_REG_2_OFST,
+				((mode & IPA_AGGREGATION_MODE_MSK) <<
+					IPA_AGGREGATION_MODE_SHFT) |
+					(reg_val & IPA_AGGREGATION_MODE_BMSK));
+	} else {
+		reg_val = ipa_read_reg(ipa_ctx->mmio, IPA_QCNCM_OFST);
+		ipa_write_reg(ipa_ctx->mmio, IPA_QCNCM_OFST, (mode & 0x1) |
+				(reg_val & 0xfffffffe));
+
+	}
 	return 0;
 }
 EXPORT_SYMBOL(ipa_set_aggr_mode);
@@ -1291,15 +1255,25 @@ int ipa_set_qcncm_ndp_sig(char sig[3])
 {
 	u32 reg_val;
 
-	if (sig == NULL) {
-		IPAERR("bad argument for ipa_set_qcncm_ndp_sig/n");
-		return -EINVAL;
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0) {
+		if (sig == NULL) {
+			IPAERR("bad argument for ipa_set_qcncm_ndp_sig/n");
+			return -EINVAL;
+		}
+		reg_val = ipa_read_reg(ipa_ctx->mmio,
+				IPA_AGGREGATION_SPARE_REG_2_OFST);
+		ipa_write_reg(ipa_ctx->mmio,
+				IPA_AGGREGATION_SPARE_REG_2_OFST, sig[0] <<
+				IPA_AGGREGATION_QCNCM_SIG0_SHFT |
+				(sig[1] << IPA_AGGREGATION_QCNCM_SIG1_SHFT) |
+				sig[2] |
+				(reg_val & IPA_AGGREGATION_QCNCM_SIG_BMSK));
+	} else {
+		reg_val = ipa_read_reg(ipa_ctx->mmio, IPA_QCNCM_OFST);
+		ipa_write_reg(ipa_ctx->mmio, IPA_QCNCM_OFST, sig[0] << 20 |
+				(sig[1] << 12) | (sig[2] << 4) |
+				(reg_val & 0xf000000f));
 	}
-	reg_val = ipa_read_reg(ipa_ctx->mmio, IPA_AGGREGATION_SPARE_REG_2_OFST);
-	ipa_write_reg(ipa_ctx->mmio, IPA_AGGREGATION_SPARE_REG_2_OFST, sig[0] <<
-			IPA_AGGREGATION_QCNCM_SIG0_SHFT |
-			(sig[1] << IPA_AGGREGATION_QCNCM_SIG1_SHFT) |
-			sig[2] | (reg_val & IPA_AGGREGATION_QCNCM_SIG_BMSK));
 	return 0;
 }
 EXPORT_SYMBOL(ipa_set_qcncm_ndp_sig);
@@ -1314,10 +1288,19 @@ EXPORT_SYMBOL(ipa_set_qcncm_ndp_sig);
 int ipa_set_single_ndp_per_mbim(bool enable)
 {
 	u32 reg_val;
-	reg_val = ipa_read_reg(ipa_ctx->mmio, IPA_AGGREGATION_SPARE_REG_1_OFST);
-	ipa_write_reg(ipa_ctx->mmio, IPA_AGGREGATION_SPARE_REG_1_OFST, (enable &
-			IPA_AGGREGATION_SINGLE_NDP_MSK) |
-			(reg_val & IPA_AGGREGATION_SINGLE_NDP_BMSK));
+
+	if (ipa_ctx->ipa_hw_type == IPA_HW_v1_0) {
+		reg_val = ipa_read_reg(ipa_ctx->mmio,
+				IPA_AGGREGATION_SPARE_REG_1_OFST);
+		ipa_write_reg(ipa_ctx->mmio,
+				IPA_AGGREGATION_SPARE_REG_1_OFST, (enable &
+				IPA_AGGREGATION_SINGLE_NDP_MSK) |
+				(reg_val & IPA_AGGREGATION_SINGLE_NDP_BMSK));
+	} else {
+		reg_val = ipa_read_reg(ipa_ctx->mmio, IPA_SINGLE_NDP_MODE_OFST);
+		ipa_write_reg(ipa_ctx->mmio, IPA_SINGLE_NDP_MODE_OFST,
+				(enable & 0x1) | (reg_val & 0xfffffffe));
+	}
 	return 0;
 }
 EXPORT_SYMBOL(ipa_set_single_ndp_per_mbim);
@@ -1368,4 +1351,3 @@ int ipa_straddle_boundary(u32 start, u32 end, u32 boundary)
 	else
 		return 0;
 }
-

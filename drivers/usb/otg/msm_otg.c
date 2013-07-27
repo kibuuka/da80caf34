@@ -95,7 +95,7 @@ static bool mhl_det_in_progress;
 
 static struct regulator *hsusb_3p3;
 static struct regulator *hsusb_1p8;
-static struct regulator *hsusb_vddcx;
+static struct regulator *hsusb_vdd;
 static struct regulator *vbus_otg;
 static struct regulator *mhl_usb_hs_switch;
 static struct power_supply *psy;
@@ -111,7 +111,7 @@ static inline bool aca_enabled(void)
 #endif
 }
 
-static const int vdd_val[VDD_TYPE_MAX][VDD_VAL_MAX] = {
+static int vdd_val[VDD_TYPE_MAX][VDD_VAL_MAX] = {
 		{  /* VDD_CX CORNER Voting */
 			[VDD_NONE]	= RPM_VREG_CORNER_NONE,
 			[VDD_MIN]	= RPM_VREG_CORNER_NOMINAL,
@@ -151,8 +151,8 @@ static int msm_hsusb_ldo_init(struct msm_otg *motg, int init)
 		rc = regulator_set_voltage(hsusb_1p8, USB_PHY_1P8_VOL_MIN,
 				USB_PHY_1P8_VOL_MAX);
 		if (rc) {
-			dev_err(motg->phy.dev, "unable to set voltage level for"
-					"hsusb 1p8\n");
+			dev_err(motg->phy.dev, "unable to set voltage level "
+					"for hsusb 1p8\n");
 			goto put_1p8;
 		}
 
@@ -175,7 +175,7 @@ static int msm_hsusb_config_vddcx(int high)
 	int ret;
 
 	min_vol = vdd_val[vdd_type][!!high];
-	ret = regulator_set_voltage(hsusb_vddcx, min_vol, max_vol);
+	ret = regulator_set_voltage(hsusb_vdd, min_vol, max_vol);
 	if (ret) {
 		pr_err("%s: unable to set the voltage for regulator "
 			"HSUSB_VDDCX\n", __func__);
@@ -207,7 +207,7 @@ static int msm_hsusb_ldo_enable(struct msm_otg *motg,
 		ret = regulator_set_optimum_mode(hsusb_1p8,
 				USB_PHY_1P8_HPM_LOAD);
 		if (ret < 0) {
-			pr_err("%s: Unable to set HPM of the regulator:"
+			pr_err("%s: Unable to set HPM of the regulator "
 				"HSUSB_1p8\n", __func__);
 			return ret;
 		}
@@ -223,7 +223,7 @@ static int msm_hsusb_ldo_enable(struct msm_otg *motg,
 		ret = regulator_set_optimum_mode(hsusb_3p3,
 				USB_PHY_3P3_HPM_LOAD);
 		if (ret < 0) {
-			pr_err("%s: Unable to set HPM of the regulator:"
+			pr_err("%s: Unable to set HPM of the regulator "
 				"HSUSB_3p3\n", __func__);
 			regulator_set_optimum_mode(hsusb_1p8, 0);
 			regulator_disable(hsusb_1p8);
@@ -252,7 +252,7 @@ static int msm_hsusb_ldo_enable(struct msm_otg *motg,
 
 		ret = regulator_set_optimum_mode(hsusb_1p8, 0);
 		if (ret < 0)
-			pr_err("%s: Unable to set LPM of the regulator:"
+			pr_err("%s: Unable to set LPM of the regulator "
 				"HSUSB_1p8\n", __func__);
 
 		ret = regulator_disable(hsusb_3p3);
@@ -263,7 +263,7 @@ static int msm_hsusb_ldo_enable(struct msm_otg *motg,
 		}
 		ret = regulator_set_optimum_mode(hsusb_3p3, 0);
 		if (ret < 0)
-			pr_err("%s: Unable to set LPM of the regulator:"
+			pr_err("%s: Unable to set LPM of the regulator "
 				"HSUSB_3p3\n", __func__);
 
 		break;
@@ -478,6 +478,7 @@ static int msm_otg_phy_reset(struct msm_otg *motg)
 	u32 val;
 	int ret;
 	int retries;
+	struct msm_otg_platform_data *pdata = motg->pdata;
 
 	ret = msm_otg_link_clk_reset(motg, 1);
 	if (ret)
@@ -485,13 +486,20 @@ static int msm_otg_phy_reset(struct msm_otg *motg)
 	ret = msm_otg_phy_clk_reset(motg);
 	if (ret)
 		return ret;
-	/* 10 usec delay is required according to spec */
+
+	/*
+	 * 10 usec delay is required according to spec. Using larger value
+	 * since the exact value proved to not work 100% of the time.
+	 */
 	if (IS_ERR(motg->phy_reset_clk))
-		usleep_range(10, 12);
+		usleep_range(100, 120);
 	ret = msm_otg_link_clk_reset(motg, 0);
 	if (ret)
 		return ret;
 
+	if (pdata && pdata->enable_sec_phy)
+		writel_relaxed(readl_relaxed(USB_PHY_CTRL2) | (1<<16),
+							USB_PHY_CTRL2);
 	val = readl(USB_PORTSC) & ~PORTSC_PTS_MASK;
 	writel(val | PORTSC_PTS_ULPI, USB_PORTSC);
 
@@ -531,6 +539,7 @@ static int msm_otg_phy_reset(struct msm_otg *motg)
 static int msm_otg_link_reset(struct msm_otg *motg)
 {
 	int cnt = 0;
+	struct msm_otg_platform_data *pdata = motg->pdata;
 
 	writel_relaxed(USBCMD_RESET, USB_USBCMD);
 	while (cnt < LINK_RESET_TIMEOUT_USEC) {
@@ -547,6 +556,9 @@ static int msm_otg_link_reset(struct msm_otg *motg)
 	writel_relaxed(0x0, USB_AHBBURST);
 	writel_relaxed(0x08, USB_AHBMODE);
 
+	if (pdata && pdata->enable_sec_phy)
+		writel_relaxed(readl_relaxed(USB_PHY_CTRL2) | (1<<16),
+								USB_PHY_CTRL2);
 	return 0;
 }
 
@@ -849,13 +861,16 @@ static int msm_otg_suspend(struct msm_otg *motg)
 	struct usb_bus *bus = phy->otg->host;
 	struct msm_otg_platform_data *pdata = motg->pdata;
 	int cnt = 0;
-	bool host_bus_suspend, device_bus_suspend, dcp;
+	bool host_bus_suspend, device_bus_suspend, dcp, prop_charger;
 	u32 phy_ctrl_val = 0, cmd_val;
 	unsigned ret;
 	u32 portsc;
 
 	if (atomic_read(&motg->in_lpm))
 		return 0;
+
+	if (motg->pdata->delay_lpm_hndshk_on_disconnect && !msm_bam_lpm_ok())
+		return -EBUSY;
 
 	disable_irq(motg->irq);
 	host_bus_suspend = !test_bit(MHL, &motg->inputs) && phy->otg->host &&
@@ -864,6 +879,7 @@ static int msm_otg_suspend(struct msm_otg *motg)
 		test_bit(A_BUS_SUSPEND, &motg->inputs) &&
 		motg->caps & ALLOW_LPM_ON_DEV_SUSPEND;
 	dcp = motg->chg_type == USB_DCP_CHARGER;
+	prop_charger = motg->chg_type == USB_PROPRIETARY_CHARGER;
 
 	/*
 	 * Abort suspend when,
@@ -872,7 +888,7 @@ static int msm_otg_suspend(struct msm_otg *motg)
 	 */
 
 	if ((test_bit(B_SESS_VLD, &motg->inputs) && !device_bus_suspend &&
-		!dcp) || test_bit(A_BUS_REQ, &motg->inputs)) {
+		!dcp && !prop_charger) || test_bit(A_BUS_REQ, &motg->inputs)) {
 		enable_irq(motg->irq);
 		return -EBUSY;
 	}
@@ -940,7 +956,7 @@ static int msm_otg_suspend(struct msm_otg *motg)
 	 */
 	cmd_val = readl_relaxed(USB_USBCMD);
 	if (host_bus_suspend || device_bus_suspend ||
-		(motg->pdata->otg_control == OTG_PHY_CONTROL && dcp))
+		(motg->pdata->otg_control == OTG_PHY_CONTROL))
 		cmd_val |= ASYNC_INTR_CTRL | ULPI_STP_CTRL;
 	else
 		cmd_val |= ULPI_STP_CTRL;
@@ -980,12 +996,18 @@ static int msm_otg_suspend(struct msm_otg *motg)
 
 	/* usb phy no more require TCXO clock, hence vote for TCXO disable */
 	if (!host_bus_suspend) {
-		ret = msm_xo_mode_vote(motg->xo_handle, MSM_XO_MODE_OFF);
-		if (ret)
-			dev_err(phy->dev, "%s failed to devote for "
-				"TCXO D0 buffer%d\n", __func__, ret);
-		else
+		if (!IS_ERR(motg->xo_clk)) {
+			clk_disable_unprepare(motg->xo_clk);
 			motg->lpm_flags |= XO_SHUTDOWN;
+		} else {
+			ret = msm_xo_mode_vote(motg->xo_handle,
+							MSM_XO_MODE_OFF);
+			if (ret)
+				dev_err(phy->dev, "%s fail to devote XO %d\n",
+								 __func__, ret);
+			else
+				motg->lpm_flags |= XO_SHUTDOWN;
+		}
 	}
 
 	if (motg->caps & ALLOW_PHY_POWER_COLLAPSE &&
@@ -1004,9 +1026,11 @@ static int msm_otg_suspend(struct msm_otg *motg)
 	}
 
 	if (device_may_wakeup(phy->dev)) {
-		enable_irq_wake(motg->irq);
 		if (motg->async_irq)
 			enable_irq_wake(motg->async_irq);
+		else
+			enable_irq_wake(motg->irq);
+
 		if (motg->pdata->pmic_id_irq)
 			enable_irq_wake(motg->pdata->pmic_id_irq);
 		if (pdata->otg_control == OTG_PHY_CONTROL &&
@@ -1046,10 +1070,14 @@ static int msm_otg_resume(struct msm_otg *motg)
 
 	/* Vote for TCXO when waking up the phy */
 	if (motg->lpm_flags & XO_SHUTDOWN) {
-		ret = msm_xo_mode_vote(motg->xo_handle, MSM_XO_MODE_ON);
-		if (ret)
-			dev_err(phy->dev, "%s failed to vote for "
-				"TCXO D0 buffer%d\n", __func__, ret);
+		if (!IS_ERR(motg->xo_clk)) {
+			clk_prepare_enable(motg->xo_clk);
+		} else {
+			ret = msm_xo_mode_vote(motg->xo_handle, MSM_XO_MODE_ON);
+			if (ret)
+				dev_err(phy->dev, "%s fail to vote for XO %d\n",
+								__func__, ret);
+		}
 		motg->lpm_flags &= ~XO_SHUTDOWN;
 	}
 
@@ -1113,9 +1141,11 @@ static int msm_otg_resume(struct msm_otg *motg)
 
 skip_phy_resume:
 	if (device_may_wakeup(phy->dev)) {
-		disable_irq_wake(motg->irq);
 		if (motg->async_irq)
 			disable_irq_wake(motg->async_irq);
+		else
+			disable_irq_wake(motg->irq);
+
 		if (motg->pdata->pmic_id_irq)
 			disable_irq_wake(motg->pdata->pmic_id_irq);
 		if (pdata->otg_control == OTG_PHY_CONTROL &&
@@ -1197,7 +1227,7 @@ static int msm_otg_notify_chg_type(struct msm_otg *motg)
 		motg->chg_type == USB_ACA_C_CHARGER))
 		charger_type = POWER_SUPPLY_TYPE_USB_ACA;
 	else
-		charger_type = POWER_SUPPLY_TYPE_BATTERY;
+		charger_type = POWER_SUPPLY_TYPE_UNKNOWN;
 
 	if (!psy) {
 		pr_err("No USB power supply registered!\n");
@@ -1468,7 +1498,7 @@ static int msm_otg_set_host(struct usb_otg *otg, struct usb_bus *host)
 		vbus_otg = devm_regulator_get(motg->phy.dev, "vbus_otg");
 		if (IS_ERR(vbus_otg)) {
 			pr_err("Unable to get vbus_otg\n");
-			return -ENODEV;
+			return PTR_ERR(vbus_otg);
 		}
 	}
 
@@ -1557,7 +1587,7 @@ static void msm_otg_start_peripheral(struct usb_otg *otg, int on)
 }
 
 static int msm_otg_set_peripheral(struct usb_otg *otg,
-			struct usb_gadget *gadget)
+					struct usb_gadget *gadget)
 {
 	struct msm_otg *motg = container_of(otg->phy, struct msm_otg, phy);
 
@@ -2276,6 +2306,11 @@ static void msm_chg_detect_work(struct work_struct *w)
 	case USB_CHG_STATE_SECONDARY_DONE:
 		motg->chg_state = USB_CHG_STATE_DETECTED;
 	case USB_CHG_STATE_DETECTED:
+		/*
+		 * Notify the charger type to power supply
+		 * owner as soon as we determine the charger.
+		 */
+		msm_otg_notify_chg_type(motg);
 		msm_chg_block_off(motg);
 		msm_chg_enable_aca_det(motg);
 		/*
@@ -2479,6 +2514,7 @@ static void msm_otg_sm_work(struct work_struct *w)
 			pr_debug("chg_work cancel");
 			del_timer_sync(&motg->chg_check_timer);
 			clear_bit(B_FALSE_SDP, &motg->inputs);
+			clear_bit(A_BUS_REQ, &motg->inputs);
 			cancel_delayed_work_sync(&motg->chg_work);
 			motg->chg_state = USB_CHG_STATE_UNDEFINED;
 			motg->chg_type = USB_INVALID_CHARGER;
@@ -2993,10 +3029,10 @@ static irqreturn_t msm_otg_irq(int irq, void *data)
 
 	if ((otgsc & OTGSC_IDIS) && (otgsc & OTGSC_IDIE)) {
 		if (otgsc & OTGSC_ID) {
-			pr_debug("Id set\n");
+			dev_dbg(otg->phy->dev, "ID set\n");
 			set_bit(ID, &motg->inputs);
 		} else {
-			pr_debug("Id clear\n");
+			dev_dbg(otg->phy->dev, "ID clear\n");
 			/*
 			 * Assert a_bus_req to supply power on
 			 * VBUS when Micro/Mini-A cable is connected
@@ -3014,7 +3050,7 @@ static irqreturn_t msm_otg_irq(int irq, void *data)
 		set_bit(A_SRP_DET, &motg->inputs);
 		set_bit(A_BUS_REQ, &motg->inputs);
 		work = 1;
-	} else if (otgsc & OTGSC_BSVIS) {
+	} else if ((otgsc & OTGSC_BSVIE) && (otgsc & OTGSC_BSVIS)) {
 		writel_relaxed(otgsc, USB_OTGSC);
 		/*
 		 * BSV interrupt comes when operating as an A-device
@@ -3025,10 +3061,10 @@ static irqreturn_t msm_otg_irq(int irq, void *data)
 			!test_bit(ID_A, &motg->inputs))
 			return IRQ_HANDLED;
 		if (otgsc & OTGSC_BSV) {
-			pr_debug("BSV set\n");
+			dev_dbg(otg->phy->dev, "BSV set\n");
 			set_bit(B_SESS_VLD, &motg->inputs);
 		} else {
-			pr_debug("BSV clear\n");
+			dev_dbg(otg->phy->dev, "BSV clear\n");
 			clear_bit(B_SESS_VLD, &motg->inputs);
 			clear_bit(A_BUS_SUSPEND, &motg->inputs);
 
@@ -3133,7 +3169,15 @@ static void msm_otg_set_vbus_state(int online)
 	static bool init;
 	struct msm_otg *motg = the_msm_otg;
 
-	/* Ignore received BSV interrupts, if ID pin is GND */
+	if (online) {
+		pr_debug("PMIC: BSV set\n");
+		set_bit(B_SESS_VLD, &motg->inputs);
+	} else {
+		pr_debug("PMIC: BSV clear\n");
+		clear_bit(B_SESS_VLD, &motg->inputs);
+	}
+
+	/* do not queue state m/c work if id is grounded */
 	if (!test_bit(ID, &motg->inputs)) {
 		/*
 		 * state machine work waits for initial VBUS
@@ -3142,17 +3186,8 @@ static void msm_otg_set_vbus_state(int online)
 		 */
 		if (init)
 			return;
-		goto complete;
 	}
 
-	if (online) {
-		pr_debug("PMIC: BSV set\n");
-		set_bit(B_SESS_VLD, &motg->inputs);
-	} else {
-		pr_debug("PMIC: BSV clear\n");
-		clear_bit(B_SESS_VLD, &motg->inputs);
-	}
-complete:
 	if (!init) {
 		init = true;
 		complete(&pmic_vbus_init);
@@ -3222,9 +3257,9 @@ static irqreturn_t msm_pmic_id_irq(int irq, void *data)
 static int msm_otg_mode_show(struct seq_file *s, void *unused)
 {
 	struct msm_otg *motg = s->private;
-	struct usb_phy *phy = &motg->phy;
+	struct usb_otg *otg = motg->phy.otg;
 
-	switch (phy->state) {
+	switch (otg->phy->state) {
 	case OTG_STATE_A_HOST:
 		seq_printf(s, "host\n");
 		break;
@@ -3628,7 +3663,7 @@ static void msm_otg_pnoc_errata_fix(struct msm_otg *motg)
 	cmd_buf.vmid_idx = MSM_OTG_VMID_IDX;
 	cmd_buf.mem_type = MSM_OTG_MEM_TYPE;
 
-	ret = scm_call(SCM_SVC_CP, MSM_OTG_CMD_ID, &cmd_buf,
+	ret = scm_call(SCM_SVC_MP, MSM_OTG_CMD_ID, &cmd_buf,
 				sizeof(cmd_buf), NULL, 0);
 
 	if (ret)
@@ -3761,12 +3796,26 @@ struct msm_otg_platform_data *msm_otg_dt_to_pdata(struct platform_device *pdev)
 				&pdata->default_mode);
 	of_property_read_u32(node, "qcom,hsusb-otg-phy-type",
 				&pdata->phy_type);
-	of_property_read_u32(node, "qcom,hsusb-otg-pmic-id-irq",
-				&pdata->pmic_id_irq);
 	pdata->disable_reset_on_disconnect = of_property_read_bool(node,
 				"qcom,hsusb-otg-disable-reset");
 	pdata->pnoc_errata_fix = of_property_read_bool(node,
 				"qcom,hsusb-otg-pnoc-errata-fix");
+	pdata->enable_lpm_on_dev_suspend = of_property_read_bool(node,
+				"qcom,hsusb-otg-lpm-on-dev-suspend");
+	pdata->core_clk_always_on_workaround = of_property_read_bool(node,
+				"qcom,hsusb-otg-clk-always-on-workaround");
+	pdata->delay_lpm_on_disconnect = of_property_read_bool(node,
+				"qcom,hsusb-otg-delay-lpm");
+	pdata->delay_lpm_hndshk_on_disconnect = of_property_read_bool(node,
+				"qcom,hsusb-otg-delay-lpm-hndshk-on-disconnect");
+	pdata->dp_manual_pullup = of_property_read_bool(node,
+				"qcom,dp-manual-pullup");
+	pdata->enable_sec_phy = of_property_read_bool(node,
+					"qcom,usb2-enable-hsphy2");
+
+	pdata->pmic_id_irq = platform_get_irq_byname(pdev, "pmic_id_irq");
+	if (pdata->pmic_id_irq < 0)
+		pdata->pmic_id_irq = 0;
 
 	return pdata;
 }
@@ -3774,6 +3823,8 @@ struct msm_otg_platform_data *msm_otg_dt_to_pdata(struct platform_device *pdev)
 static int __init msm_otg_probe(struct platform_device *pdev)
 {
 	int ret = 0;
+	int len = 0;
+	u32 tmp[3];
 	struct resource *res;
 	struct msm_otg *motg;
 	struct usb_phy *phy;
@@ -3864,7 +3915,20 @@ static int __init msm_otg_probe(struct platform_device *pdev)
 		ret = PTR_ERR(motg->core_clk);
 		goto put_clk;
 	}
-	clk_set_rate(motg->core_clk, INT_MAX);
+
+	/*
+	 * Get Max supported clk frequency for USB Core CLK and request
+	 * to set the same.
+	 */
+	motg->core_clk_rate = clk_round_rate(motg->core_clk, LONG_MAX);
+	if (IS_ERR_VALUE(motg->core_clk_rate)) {
+		dev_err(&pdev->dev, "fail to get core clk max freq.\n");
+	} else {
+		ret = clk_set_rate(motg->core_clk, motg->core_clk_rate);
+		if (ret)
+			dev_err(&pdev->dev, "fail to set core_clk freq:%d\n",
+									ret);
+	}
 
 	motg->pclk = clk_get(&pdev->dev, "iface_clk");
 	if (IS_ERR(motg->pclk)) {
@@ -3901,33 +3965,60 @@ static int __init msm_otg_probe(struct platform_device *pdev)
 		motg->async_irq = 0;
 	}
 
-	motg->xo_handle = msm_xo_get(MSM_XO_TCXO_D0, "usb");
-	if (IS_ERR(motg->xo_handle)) {
-		dev_err(&pdev->dev, "%s not able to get the handle "
-			"to vote for TCXO D0 buffer\n", __func__);
-		ret = PTR_ERR(motg->xo_handle);
-		goto free_regs;
+	motg->xo_clk = clk_get(&pdev->dev, "xo");
+	if (IS_ERR(motg->xo_clk)) {
+		motg->xo_handle = msm_xo_get(MSM_XO_TCXO_D0, "usb");
+		if (IS_ERR(motg->xo_handle)) {
+			dev_err(&pdev->dev, "%s fail to get handle for TCXO\n",
+								__func__);
+			ret = PTR_ERR(motg->xo_handle);
+			goto free_regs;
+		} else {
+			ret = msm_xo_mode_vote(motg->xo_handle, MSM_XO_MODE_ON);
+			if (ret) {
+				dev_err(&pdev->dev, "%s XO voting failed %d\n",
+								__func__, ret);
+				goto free_xo_handle;
+			}
+		}
+	} else {
+		ret = clk_prepare_enable(motg->xo_clk);
+		if (ret) {
+			dev_err(&pdev->dev, "%s failed to vote for TCXO %d\n",
+							__func__, ret);
+			goto free_xo_handle;
+		}
 	}
 
-	ret = msm_xo_mode_vote(motg->xo_handle, MSM_XO_MODE_ON);
-	if (ret) {
-		dev_err(&pdev->dev, "%s failed to vote for TCXO "
-			"D0 buffer%d\n", __func__, ret);
-		goto free_xo_handle;
-	}
 
 	clk_prepare_enable(motg->pclk);
 
 	motg->vdd_type = VDDCX_CORNER;
-	hsusb_vddcx = devm_regulator_get(motg->phy.dev, "hsusb_vdd_dig");
-	if (IS_ERR(hsusb_vddcx)) {
-		hsusb_vddcx = devm_regulator_get(motg->phy.dev, "HSUSB_VDDCX");
-		if (IS_ERR(hsusb_vddcx)) {
+	hsusb_vdd = devm_regulator_get(motg->phy.dev, "hsusb_vdd_dig");
+	if (IS_ERR(hsusb_vdd)) {
+		hsusb_vdd = devm_regulator_get(motg->phy.dev, "HSUSB_VDDCX");
+		if (IS_ERR(hsusb_vdd)) {
 			dev_err(motg->phy.dev, "unable to get hsusb vddcx\n");
-			ret = PTR_ERR(hsusb_vddcx);
+			ret = PTR_ERR(hsusb_vdd);
 			goto devote_xo_handle;
 		}
 		motg->vdd_type = VDDCX;
+	}
+
+	if (pdev->dev.of_node) {
+		of_get_property(pdev->dev.of_node,
+				"qcom,vdd-voltage-level",
+				&len);
+		if (len == sizeof(tmp)) {
+			of_property_read_u32_array(pdev->dev.of_node,
+					"qcom,vdd-voltage-level",
+					tmp, len/sizeof(*tmp));
+			vdd_val[motg->vdd_type][0] = tmp[0];
+			vdd_val[motg->vdd_type][1] = tmp[1];
+			vdd_val[motg->vdd_type][2] = tmp[2];
+		} else {
+			dev_dbg(&pdev->dev, "Using default hsusb vdd config.\n");
+		}
 	}
 
 	ret = msm_hsusb_config_vddcx(1);
@@ -3936,7 +4027,7 @@ static int __init msm_otg_probe(struct platform_device *pdev)
 		goto devote_xo_handle;
 	}
 
-	ret = regulator_enable(hsusb_vddcx);
+	ret = regulator_enable(hsusb_vdd);
 	if (ret) {
 		dev_err(&pdev->dev, "unable to enable the hsusb vddcx\n");
 		goto free_config_vddcx;
@@ -3945,7 +4036,7 @@ static int __init msm_otg_probe(struct platform_device *pdev)
 	ret = msm_hsusb_ldo_init(motg, 1);
 	if (ret) {
 		dev_err(&pdev->dev, "hsusb vreg configuration failed\n");
-		goto free_hsusb_vddcx;
+		goto free_hsusb_vdd;
 	}
 
 	if (pdata->mhl_enable) {
@@ -4017,6 +4108,11 @@ static int __init msm_otg_probe(struct platform_device *pdev)
 	phy->otg->set_peripheral = msm_otg_set_peripheral;
 	phy->otg->start_hnp = msm_otg_start_hnp;
 	phy->otg->start_srp = msm_otg_start_srp;
+	if (pdata->dp_manual_pullup)
+		phy->flags |= ENABLE_DP_MANUAL_PULLUP;
+
+	if (pdata->enable_sec_phy)
+		phy->flags |= ENABLE_SECONDARY_PHY;
 
 	ret = usb_set_transceiver(&motg->phy);
 	if (ret) {
@@ -4128,17 +4224,23 @@ destroy_wlock:
 	msm_hsusb_ldo_enable(motg, USB_PHY_REG_OFF);
 free_ldo_init:
 	msm_hsusb_ldo_init(motg, 0);
-free_hsusb_vddcx:
-	regulator_disable(hsusb_vddcx);
+free_hsusb_vdd:
+	regulator_disable(hsusb_vdd);
 free_config_vddcx:
-	regulator_set_voltage(hsusb_vddcx,
+	regulator_set_voltage(hsusb_vdd,
 		vdd_val[motg->vdd_type][VDD_NONE],
 		vdd_val[motg->vdd_type][VDD_MAX]);
 devote_xo_handle:
 	clk_disable_unprepare(motg->pclk);
-	msm_xo_mode_vote(motg->xo_handle, MSM_XO_MODE_OFF);
+	if (!IS_ERR(motg->xo_clk))
+		clk_disable_unprepare(motg->xo_clk);
+	else
+		msm_xo_mode_vote(motg->xo_handle, MSM_XO_MODE_OFF);
 free_xo_handle:
-	msm_xo_put(motg->xo_handle);
+	if (!IS_ERR(motg->xo_clk))
+		clk_put(motg->xo_clk);
+	else
+		msm_xo_put(motg->xo_handle);
 free_regs:
 	iounmap(motg->regs);
 put_pclk:
@@ -4160,10 +4262,10 @@ free_motg:
 static int __devexit msm_otg_remove(struct platform_device *pdev)
 {
 	struct msm_otg *motg = platform_get_drvdata(pdev);
-	struct usb_otg *otg = motg->phy.otg;
+	struct usb_phy *phy = &motg->phy;
 	int cnt = 0;
 
-	if (otg->host || otg->gadget)
+	if (phy->otg->host || phy->otg->gadget)
 		return -EBUSY;
 
 	if (pdev->dev.of_node)
@@ -4196,8 +4298,8 @@ static int __devexit msm_otg_remove(struct platform_device *pdev)
 	/*
 	 * Put PHY in low power mode.
 	 */
-	ulpi_read(otg->phy, 0x14);
-	ulpi_write(otg->phy, 0x08, 0x09);
+	ulpi_read(phy, 0x14);
+	ulpi_write(phy, 0x08, 0x09);
 
 	writel(readl(USB_PORTSC) | PORTSC_PHCD, USB_PORTSC);
 	while (cnt < PHY_SUSPEND_TIMEOUT_USEC) {
@@ -4207,15 +4309,20 @@ static int __devexit msm_otg_remove(struct platform_device *pdev)
 		cnt++;
 	}
 	if (cnt >= PHY_SUSPEND_TIMEOUT_USEC)
-		dev_err(otg->phy->dev, "Unable to suspend PHY\n");
+		dev_err(phy->dev, "Unable to suspend PHY\n");
 
 	clk_disable_unprepare(motg->pclk);
 	clk_disable_unprepare(motg->core_clk);
-	msm_xo_put(motg->xo_handle);
+	if (!IS_ERR(motg->xo_clk)) {
+		clk_disable_unprepare(motg->xo_clk);
+		clk_put(motg->xo_clk);
+	} else {
+		msm_xo_put(motg->xo_handle);
+	}
 	msm_hsusb_ldo_enable(motg, USB_PHY_REG_OFF);
 	msm_hsusb_ldo_init(motg, 0);
-	regulator_disable(hsusb_vddcx);
-	regulator_set_voltage(hsusb_vddcx,
+	regulator_disable(hsusb_vdd);
+	regulator_set_voltage(hsusb_vdd,
 		vdd_val[motg->vdd_type][VDD_NONE],
 		vdd_val[motg->vdd_type][VDD_MAX]);
 

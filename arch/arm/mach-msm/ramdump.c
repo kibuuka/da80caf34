@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,7 +25,7 @@
 #include <linux/elf.h>
 #include <linux/wait.h>
 
-#include "ramdump.h"
+#include <mach/ramdump.h>
 
 #define RAMDUMP_WAIT_MSECS	120000
 
@@ -104,6 +104,7 @@ static int ramdump_read(struct file *filep, char __user *buf, size_t count,
 	unsigned long addr = 0;
 	size_t copy_size = 0;
 	int ret = 0;
+	loff_t orig_pos = *pos;
 
 	if ((filep->f_flags & O_NONBLOCK) && !rd_dev->data_ready)
 		return -EAGAIN;
@@ -113,9 +114,10 @@ static int ramdump_read(struct file *filep, char __user *buf, size_t count,
 		return ret;
 
 	if (*pos < rd_dev->elfcore_size) {
-		copy_size = min(rd_dev->elfcore_size, count);
+		copy_size = rd_dev->elfcore_size - *pos;
+		copy_size = min(copy_size, count);
 
-		if (copy_to_user(buf, rd_dev->elfcore_buf, copy_size)) {
+		if (copy_to_user(buf, rd_dev->elfcore_buf + *pos, copy_size)) {
 			ret = -EFAULT;
 			goto ramdump_done;
 		}
@@ -165,7 +167,7 @@ static int ramdump_read(struct file *filep, char __user *buf, size_t count,
 	pr_debug("Ramdump(%s): Read %d bytes from address %lx.",
 			rd_dev->name, copy_size, addr);
 
-	return copy_size;
+	return *pos - orig_pos;
 
 ramdump_done:
 	rd_dev->data_ready = 0;

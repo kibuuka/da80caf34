@@ -91,6 +91,10 @@ config BT_HCIUART_LL
 
 	  Say Y here to compile support for HCILL protocol.
 
+config BT_HCIUART_BRCM
+	bool "HCIBRCM protocol support"
+	depends on BT_HCIUART
+
 config BT_HCIUART_IBS
 	bool "HCI_IBS protocol support"
 	depends on BT_HCIUART

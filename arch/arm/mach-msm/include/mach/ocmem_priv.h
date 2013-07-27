@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,10 +29,20 @@
 #define TO_OCMEM 0x0
 #define TO_DDR 0x1
 
+#define OCMEM_SVC_ID 15
+#define OCMEM_LOCK_CMD_ID 0x1
+#define OCMEM_UNLOCK_CMD_ID 0x2
+#define OCMEM_ENABLE_DUMP_CMD_ID 0x3
+#define OCMEM_DISABLE_DUMP_CMD_ID 0x4
+
+#define OCMEM_SECURE_SVC_ID 12
+#define OCMEM_SECURE_CFG_ID 0x2
+#define OCMEM_SECURE_DEV_ID 0x5
+
 struct ocmem_zone;
 
 struct ocmem_zone_ops {
-	unsigned long (*allocate) (struct ocmem_zone *, unsigned long);
+	int (*allocate) (struct ocmem_zone *, unsigned long, unsigned long *);
 	int (*free) (struct ocmem_zone *, unsigned long, unsigned long);
 };
 
@@ -75,6 +85,12 @@ struct ocmem_zone {
 	atomic_long_t z_stat[NR_OCMEM_ZSTAT_ITEMS];
 	struct gen_pool *z_pool;
 	struct ocmem_zone_ops *z_ops;
+	unsigned int max_alloc_time;
+	unsigned int min_alloc_time;
+	u64 total_alloc_time;
+	unsigned int max_free_time;
+	unsigned int min_free_time;
+	u64 total_free_time;
 };
 
 enum op_code {
@@ -158,6 +174,8 @@ struct ocmem_req {
 	/* Request Power State */
 	unsigned power_state;
 	struct ocmem_eviction_data *edata;
+	/* Request that triggered eviction */
+	struct ocmem_req *e_handle;
 };
 
 struct ocmem_handle {
@@ -179,14 +197,18 @@ struct ocmem_zone *get_zone(unsigned);
 int zone_active(int);
 unsigned long offset_to_phys(unsigned long);
 unsigned long phys_to_offset(unsigned long);
-unsigned long allocate_head(struct ocmem_zone *, unsigned long);
+int allocate_head(struct ocmem_zone *, unsigned long, unsigned long *);
 int free_head(struct ocmem_zone *, unsigned long, unsigned long);
-unsigned long allocate_tail(struct ocmem_zone *, unsigned long);
+int allocate_tail(struct ocmem_zone *, unsigned long, unsigned long *);
 int free_tail(struct ocmem_zone *, unsigned long, unsigned long);
 
 int ocmem_notifier_init(void);
 int check_notifier(int);
 const char *get_name(int);
+int get_tz_id(int);
+int ocmem_enable_sec_program(int);
+int ocmem_enable_dump(enum ocmem_client, unsigned long, unsigned long);
+int ocmem_disable_dump(enum ocmem_client, unsigned long, unsigned long);
 int check_id(int);
 int dispatch_notification(int, enum ocmem_notif_type, struct ocmem_buf *);
 
@@ -197,6 +219,7 @@ int process_allocate(int, struct ocmem_handle *, unsigned long, unsigned long,
 			unsigned long, bool, bool);
 int process_free(int, struct ocmem_handle *);
 int process_xfer(int, struct ocmem_handle *, struct ocmem_map_list *, int);
+int process_drop(int, struct ocmem_handle *, struct ocmem_map_list *);
 int process_evict(int);
 int process_restore(int);
 int process_shrink(int, struct ocmem_handle *, unsigned long);

@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -196,6 +196,9 @@ static struct list_head *coresight_build_path(struct coresight_device *csdev,
 	struct list_head *p;
 	struct coresight_connection *conn;
 
+	if (!csdev)
+		return NULL;
+
 	if (csdev->id == curr_sink) {
 		list_add_tail(&csdev->path_link, path);
 		return path;
@@ -273,9 +276,9 @@ static void coresight_disable_path(struct list_head *path, bool incl_source)
 
 static int coresight_switch_sink(struct coresight_device *csdev)
 {
-	int ret = 0;
+	int ret, prev_sink;
 	LIST_HEAD(path);
-	struct coresight_device *cd;
+	struct coresight_device *cd, *err_cd;
 
 	if (IS_ERR_OR_NULL(csdev))
 		return -EINVAL;
@@ -291,10 +294,15 @@ static int coresight_switch_sink(struct coresight_device *csdev)
 			coresight_release_path(&path);
 		}
 	}
+	prev_sink = curr_sink;
 	curr_sink = csdev->id;
 	list_for_each_entry(cd, &coresight_devs, dev_link) {
 		if (cd->type == CORESIGHT_DEV_TYPE_SOURCE && cd->enable) {
-			coresight_build_path(cd, &path);
+			if (!coresight_build_path(cd, &path)) {
+				ret = -EINVAL;
+				pr_err("coresight: build path failed\n");
+				goto err;
+			}
 			ret = coresight_enable_path(&path, false);
 			coresight_release_path(&path);
 			if (ret)
@@ -305,17 +313,30 @@ out:
 	up(&coresight_mutex);
 	return 0;
 err:
-	list_for_each_entry(cd, &coresight_devs, dev_link) {
+	err_cd = cd;
+	list_for_each_entry_continue_reverse(cd, &coresight_devs, dev_link) {
+		if (cd->type == CORESIGHT_DEV_TYPE_SOURCE && cd->enable) {
+			coresight_build_path(cd, &path);
+			coresight_disable_path(&path, true);
+			coresight_release_path(&path);
+		}
+	}
+	cd = err_cd;
+	/* This should be an enabled source, so we can disable it directly */
+	coresight_disable_source(cd);
+	list_for_each_entry_continue(cd, &coresight_devs, dev_link) {
 		if (cd->type == CORESIGHT_DEV_TYPE_SOURCE && cd->enable)
 			coresight_disable_source(cd);
 	}
+	curr_sink = prev_sink;
+	up(&coresight_mutex);
 	pr_err("coresight: sink switch failed, sources disabled; try again\n");
 	return ret;
 }
 
 int coresight_enable(struct coresight_device *csdev)
 {
-	int ret = 0;
+	int ret;
 	LIST_HEAD(path);
 
 	if (IS_ERR_OR_NULL(csdev))
@@ -325,21 +346,29 @@ int coresight_enable(struct coresight_device *csdev)
 	if (csdev->type != CORESIGHT_DEV_TYPE_SOURCE) {
 		ret = -EINVAL;
 		pr_err("coresight: wrong device type in %s\n", __func__);
-		goto out;
+		goto err;
 	}
 	if (csdev->enable)
 		goto out;
 
-	coresight_build_path(csdev, &path);
+	if (!coresight_build_path(csdev, &path)) {
+		ret = -EINVAL;
+		pr_err("coresight: build path failed\n");
+		goto err;
+	}
 	ret = coresight_enable_path(&path, true);
 	coresight_release_path(&path);
 	if (ret)
-		pr_err("coresight: enable failed\n");
+		goto err;
 out:
 	up(&coresight_mutex);
+	return 0;
+err:
+	up(&coresight_mutex);
+	pr_err("coresight: enable failed\n");
 	return ret;
 }
-EXPORT_SYMBOL_GPL(coresight_enable);
+EXPORT_SYMBOL(coresight_enable);
 
 void coresight_disable(struct coresight_device *csdev)
 {
@@ -362,7 +391,7 @@ void coresight_disable(struct coresight_device *csdev)
 out:
 	up(&coresight_mutex);
 }
-EXPORT_SYMBOL_GPL(coresight_disable);
+EXPORT_SYMBOL(coresight_disable);
 
 void coresight_abort(void)
 {
@@ -386,7 +415,7 @@ void coresight_abort(void)
 out:
 	up(&coresight_mutex);
 }
-EXPORT_SYMBOL_GPL(coresight_abort);
+EXPORT_SYMBOL(coresight_abort);
 
 static ssize_t coresight_show_type(struct device *dev,
 				   struct device_attribute *attr, char *buf)
@@ -566,6 +595,9 @@ struct coresight_device *coresight_register(struct coresight_desc *desc)
 	struct coresight_device *csdev;
 	struct coresight_connection *conns;
 
+	if (IS_ERR_OR_NULL(desc))
+		return ERR_PTR(-EINVAL);
+
 	csdev = kzalloc(sizeof(*csdev), GFP_KERNEL);
 	if (!csdev) {
 		ret = -ENOMEM;
@@ -649,7 +681,7 @@ err_kzalloc_refcnts:
 err_kzalloc_csdev:
 	return ERR_PTR(ret);
 }
-EXPORT_SYMBOL_GPL(coresight_register);
+EXPORT_SYMBOL(coresight_register);
 
 void coresight_unregister(struct coresight_device *csdev)
 {
@@ -661,13 +693,13 @@ void coresight_unregister(struct coresight_device *csdev)
 		put_device(&csdev->dev);
 	}
 }
-EXPORT_SYMBOL_GPL(coresight_unregister);
+EXPORT_SYMBOL(coresight_unregister);
 
 static int __init coresight_init(void)
 {
 	return bus_register(&coresight_bus_type);
 }
-subsys_initcall(coresight_init);
+core_initcall(coresight_init);
 
 static void __exit coresight_exit(void)
 {

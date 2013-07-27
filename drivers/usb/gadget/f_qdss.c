@@ -1,7 +1,7 @@
 /*
  * f_qdss.c -- QDSS function Driver
  *
- * Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
 
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -408,6 +408,7 @@ static void qdss_unbind(struct usb_configuration *c, struct usb_function *f)
 {
 	pr_debug("qdss_unbind\n");
 
+	clear_eps(f);
 	clear_desc(c->cdev->gadget, f);
 }
 
@@ -445,8 +446,8 @@ static void usb_qdss_disconnect_work(struct work_struct *work)
 		qdss->ch.notify(qdss->ch.priv, USB_QDSS_DISCONNECT, NULL,
 			NULL);
 		/* If the app was never started, we can skip USB BAM reset */
-		status = set_qdss_data_connection(qdss->data,
-			qdss->data->address, 0);
+		status = set_qdss_data_connection(qdss->cdev->gadget,
+			qdss->data, qdss->data->address, 0);
 		if (status)
 			pr_err("qdss_disconnect error");
 	}
@@ -465,12 +466,12 @@ static void qdss_disable(struct usb_function *f)
 	qdss->usb_connected = 0;
 	spin_unlock_irqrestore(&qdss->lock, flags);
 
+	/*cancell all active xfers*/
+	qdss_eps_disable(f);
+
 	status = uninit_data(qdss->data);
 	if (status)
 		pr_err("%s: uninit_data error\n", __func__);
-
-	/*cancell all active xfers*/
-	qdss_eps_disable(f);
 
 	schedule_work(&qdss->disconnect_w);
 }
@@ -488,7 +489,7 @@ static void usb_qdss_connect_work(struct work_struct *work)
 		return;
 	}
 
-	status = set_qdss_data_connection(qdss->data,
+	status = set_qdss_data_connection(qdss->cdev->gadget, qdss->data,
 		qdss->data->address, 1);
 	if (status) {
 		pr_err("set_qdss_data_connection error");
@@ -794,11 +795,13 @@ void usb_qdss_close(struct usb_qdss_ch *ch)
 	pr_debug("usb_qdss_close\n");
 
 	spin_lock_irqsave(&d_lock, flags);
-	/*free not used reqests*/
-	usb_qdss_free_req(ch);
 	usb_ep_dequeue(qdss->data, qdss->endless_req);
+	usb_ep_free_request(qdss->data, qdss->endless_req);
 	qdss->endless_req = NULL;
+	ch->app_conn = 0;
 	spin_unlock_irqrestore(&d_lock, flags);
+
+	msm_dwc3_restart_usb_session();
 }
 EXPORT_SYMBOL(usb_qdss_close);
 

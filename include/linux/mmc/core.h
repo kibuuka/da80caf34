@@ -8,6 +8,7 @@
 #ifndef LINUX_MMC_CORE_H
 #define LINUX_MMC_CORE_H
 
+#ifdef __KERNEL__
 #include <linux/interrupt.h>
 #include <linux/completion.h>
 
@@ -23,6 +24,7 @@ struct mmc_command {
 #define MMC_CMD23_ARG_TAG_REQ	(1 << 29)
 	u32			resp[4];
 	unsigned int		flags;		/* expected response type */
+#endif /* __KERNEL__ */
 #define MMC_RSP_PRESENT	(1 << 0)
 #define MMC_RSP_136	(1 << 1)		/* 136 bit response */
 #define MMC_RSP_CRC	(1 << 2)		/* expect valid crc */
@@ -55,6 +57,7 @@ struct mmc_command {
 #define MMC_RSP_R6	(MMC_RSP_PRESENT|MMC_RSP_CRC|MMC_RSP_OPCODE)
 #define MMC_RSP_R7	(MMC_RSP_PRESENT|MMC_RSP_CRC|MMC_RSP_OPCODE)
 
+#ifdef __KERNEL__
 #define mmc_resp_type(cmd)	((cmd)->flags & (MMC_RSP_PRESENT|MMC_RSP_136|MMC_RSP_CRC|MMC_RSP_BUSY|MMC_RSP_OPCODE))
 
 /*
@@ -143,6 +146,7 @@ struct mmc_async_req;
 
 extern int mmc_stop_bkops(struct mmc_card *);
 extern int mmc_read_bkops_status(struct mmc_card *);
+extern bool mmc_card_is_prog_state(struct mmc_card *);
 extern struct mmc_async_req *mmc_start_req(struct mmc_host *,
 					   struct mmc_async_req *, int *);
 extern int mmc_interrupt_hpi(struct mmc_card *);
@@ -195,14 +199,13 @@ extern int __mmc_claim_host(struct mmc_host *host, atomic_t *abort);
 extern void mmc_release_host(struct mmc_host *host);
 extern int mmc_try_claim_host(struct mmc_host *host);
 extern void mmc_set_ios(struct mmc_host *host);
-extern int mmc_detect_card_removed(struct mmc_host *host);
-extern int mmc_flush_cache(struct mmc_card *);
-
 extern int mmc_flush_cache(struct mmc_card *);
 
 extern int mmc_detect_card_removed(struct mmc_host *host);
 
 extern void mmc_blk_init_bkops_statistics(struct mmc_card *card);
+extern void mmc_rpm_hold(struct mmc_host *host, struct device *dev);
+extern void mmc_rpm_release(struct mmc_host *host, struct device *dev);
 
 /**
  *	mmc_claim_host - exclusively claim a host
@@ -217,4 +220,5 @@ static inline void mmc_claim_host(struct mmc_host *host)
 
 extern u32 mmc_vddrange_to_ocrmask(int vdd_min, int vdd_max);
 
+#endif /* __KERNEL__ */
 #endif /* LINUX_MMC_CORE_H */

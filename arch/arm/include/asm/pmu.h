@@ -52,6 +52,10 @@ struct arm_pmu_platdata {
 	void (*disable_irq)(int irq);
 };
 
+extern int multicore_request_irq(int irq, irq_handler_t *handle_irq);
+extern void multicore_free_irq(int irq);
+extern struct arm_pmu_platdata multicore_data;
+
 #ifdef CONFIG_CPU_HAS_PMU
 
 /**

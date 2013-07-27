@@ -1,4 +1,4 @@
-/* Copyright (c) 2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -142,34 +142,6 @@ static struct msm_gpiomux_config mdm9625_mi2s_configs[] __initdata = {
 		},
 	},
 	{
-		.gpio	= 16,		/* Sec mi2s ws */
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
-			[GPIOMUX_ACTIVE] = &mi2s_active_cfg,
-		},
-	},
-	{
-		.gpio	= 17,		/* Sec mi2s din */
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
-			[GPIOMUX_ACTIVE] = &mi2s_active_cfg,
-		},
-	},
-	{
-		.gpio	= 18,		/* Sec mi2s dout */
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
-			[GPIOMUX_ACTIVE] = &mi2s_active_cfg,
-		},
-	},
-	{
-		.gpio	= 19,		/* Sec mi2s clk */
-		.settings = {
-			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
-			[GPIOMUX_ACTIVE] = &mi2s_active_cfg,
-		},
-	},
-	{
 		.gpio	= 71,		/* mi2s mclk */
 		.settings = {
 			[GPIOMUX_SUSPENDED] = &mi2s_suspend_cfg,
@@ -304,6 +276,69 @@ struct msm_gpiomux_config sdc2_card_det_config[] __initdata = {
 	},
 };
 
+#ifdef CONFIG_FB_MSM_QPIC
+static struct gpiomux_setting qpic_lcdc_a_d = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_10MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct gpiomux_setting qpic_lcdc_cs = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_10MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct gpiomux_setting qpic_lcdc_rs = {
+	.func = GPIOMUX_FUNC_1,
+	.drv = GPIOMUX_DRV_10MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct gpiomux_setting qpic_lcdc_te = {
+	.func = GPIOMUX_FUNC_7,
+	.drv = GPIOMUX_DRV_10MA,
+	.pull = GPIOMUX_PULL_NONE,
+};
+
+static struct msm_gpiomux_config msm9625_qpic_lcdc_configs[] __initdata = {
+	{
+		.gpio      = 20,	/* a_d */
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &qpic_lcdc_a_d,
+		},
+	},
+	{
+		.gpio      = 21,	/* cs */
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &qpic_lcdc_cs,
+		},
+	},
+	{
+		.gpio      = 22,	/* te */
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &qpic_lcdc_te,
+		},
+	},
+	{
+		.gpio      = 23,	/* rs */
+		.settings = {
+			[GPIOMUX_SUSPENDED] = &qpic_lcdc_rs,
+		},
+	},
+};
+
+static void msm9625_disp_init_gpiomux(void)
+{
+	msm_gpiomux_install(msm9625_qpic_lcdc_configs,
+			ARRAY_SIZE(msm9625_qpic_lcdc_configs));
+}
+#else
+static void msm9625_disp_init_gpiomux(void)
+{
+}
+#endif /* CONFIG_FB_MSM_QPIC */
+
 void __init msm9625_init_gpiomux(void)
 {
 	int rc;
@@ -324,4 +359,5 @@ void __init msm9625_init_gpiomux(void)
 			ARRAY_SIZE(mdm9625_cdc_reset_config));
 	msm_gpiomux_install(sdc2_card_det_config,
 		ARRAY_SIZE(sdc2_card_det_config));
+	msm9625_disp_init_gpiomux();
 }

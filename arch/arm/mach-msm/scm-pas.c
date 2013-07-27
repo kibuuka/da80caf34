@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+/* Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,54 +29,22 @@
 #define PAS_SHUTDOWN_CMD	6
 #define PAS_IS_SUPPORTED_CMD	7
 
-int pas_init_image(enum pas_id id, const u8 *metadata, size_t size)
-{
-	int ret;
-	struct pas_init_image_req {
-		u32	proc;
-		u32	image_addr;
-	} request;
-	u32 scm_ret = 0;
-	/* Make memory physically contiguous */
-	void *mdata_buf = kmemdup(metadata, size, GFP_KERNEL);
+enum scm_clock_ids {
+	BUS_CLK = 0,
+	CORE_CLK,
+	IFACE_CLK,
+	CORE_CLK_SRC,
+	NUM_CLKS
+};
 
-	if (!mdata_buf)
-		return -ENOMEM;
+static const char * const scm_clock_names[NUM_CLKS] = {
+	[BUS_CLK]      = "bus_clk",
+	[CORE_CLK]     = "core_clk",
+	[IFACE_CLK]    = "iface_clk",
+	[CORE_CLK_SRC] = "core_clk_src",
+};
 
-	request.proc = id;
-	request.image_addr = virt_to_phys(mdata_buf);
-
-	ret = scm_call(SCM_SVC_PIL, PAS_INIT_IMAGE_CMD, &request,
-			sizeof(request), &scm_ret, sizeof(scm_ret));
-	kfree(mdata_buf);
-
-	if (ret)
-		return ret;
-	return scm_ret;
-}
-EXPORT_SYMBOL(pas_init_image);
-
-int pas_mem_setup(enum pas_id id, u32 start_addr, u32 len)
-{
-	int ret;
-	struct pas_init_image_req {
-		u32	proc;
-		u32	start_addr;
-		u32	len;
-	} request;
-	u32 scm_ret = 0;
-
-	request.proc = id;
-	request.start_addr = start_addr;
-	request.len = len;
-
-	ret = scm_call(SCM_SVC_PIL, PAS_MEM_SETUP_CMD, &request,
-			sizeof(request), &scm_ret, sizeof(scm_ret));
-	if (ret)
-		return ret;
-	return scm_ret;
-}
-EXPORT_SYMBOL(pas_mem_setup);
+static struct clk *scm_clocks[NUM_CLKS];
 
 static struct msm_bus_paths scm_pas_bw_tbl[] = {
 	{
@@ -108,14 +76,13 @@ static struct msm_bus_scale_pdata scm_pas_bus_pdata = {
 };
 
 static uint32_t scm_perf_client;
-static struct clk *scm_bus_clk;
 
 static DEFINE_MUTEX(scm_pas_bw_mutex);
 static int scm_pas_bw_count;
 
 static int scm_pas_enable_bw(void)
 {
-	int ret = 0;
+	int ret = 0, i;
 
 	if (!scm_perf_client)
 		return -EINVAL;
@@ -123,45 +90,115 @@ static int scm_pas_enable_bw(void)
 	mutex_lock(&scm_pas_bw_mutex);
 	if (!scm_pas_bw_count) {
 		ret = msm_bus_scale_client_update_request(scm_perf_client, 1);
-		if (ret) {
-			pr_err("bandwidth request failed (%d)\n", ret);
-		} else if (scm_bus_clk) {
-			ret = clk_prepare_enable(scm_bus_clk);
-			if (ret)
-				pr_err("clock enable failed\n");
-		}
-	}
-	if (ret)
-		msm_bus_scale_client_update_request(scm_perf_client, 0);
-	else
+		if (ret)
+			goto err_bus;
 		scm_pas_bw_count++;
+	}
+	for (i = 0; i < NUM_CLKS; i++)
+		if (clk_prepare_enable(scm_clocks[i]))
+			goto err_clk;
+
+	mutex_unlock(&scm_pas_bw_mutex);
+	return ret;
+
+err_clk:
+	pr_err("clk prepare_enable failed (%s)\n", scm_clock_names[i]);
+	for (i--; i >= 0; i--)
+		clk_disable_unprepare(scm_clocks[i]);
+
+err_bus:
+	pr_err("bandwidth request failed (%d)\n", ret);
+	msm_bus_scale_client_update_request(scm_perf_client, 0);
+
 	mutex_unlock(&scm_pas_bw_mutex);
 	return ret;
 }
 
 static void scm_pas_disable_bw(void)
 {
+	int i;
 	mutex_lock(&scm_pas_bw_mutex);
 	if (scm_pas_bw_count-- == 1) {
 		msm_bus_scale_client_update_request(scm_perf_client, 0);
-		if (scm_bus_clk)
-			clk_disable_unprepare(scm_bus_clk);
 	}
+	for (i = NUM_CLKS - 1; i >= 0; i--)
+		clk_disable_unprepare(scm_clocks[i]);
+
 	mutex_unlock(&scm_pas_bw_mutex);
 }
 
+int pas_init_image(enum pas_id id, const u8 *metadata, size_t size)
+{
+	int ret;
+	struct pas_init_image_req {
+		u32	proc;
+		u32	image_addr;
+	} request;
+	u32 scm_ret = 0;
+	void *mdata_buf;
+
+	ret = scm_pas_enable_bw();
+	if (ret)
+		return ret;
+
+	/* Make memory physically contiguous */
+	mdata_buf = kmemdup(metadata, size, GFP_KERNEL);
+
+	if (!mdata_buf)
+		return -ENOMEM;
+
+	request.proc = id;
+	request.image_addr = virt_to_phys(mdata_buf);
+
+	ret = scm_call(SCM_SVC_PIL, PAS_INIT_IMAGE_CMD, &request,
+			sizeof(request), &scm_ret, sizeof(scm_ret));
+
+	kfree(mdata_buf);
+	scm_pas_disable_bw();
+
+	if (ret)
+		return ret;
+	return scm_ret;
+}
+EXPORT_SYMBOL(pas_init_image);
+
+int pas_mem_setup(enum pas_id id, u32 start_addr, u32 len)
+{
+	int ret;
+	struct pas_init_image_req {
+		u32	proc;
+		u32	start_addr;
+		u32	len;
+	} request;
+	u32 scm_ret = 0;
+
+	request.proc = id;
+	request.start_addr = start_addr;
+	request.len = len;
+
+	ret = scm_call(SCM_SVC_PIL, PAS_MEM_SETUP_CMD, &request,
+			sizeof(request), &scm_ret, sizeof(scm_ret));
+	if (ret)
+		return ret;
+	return scm_ret;
+}
+EXPORT_SYMBOL(pas_mem_setup);
+
 int pas_auth_and_reset(enum pas_id id)
 {
-	int ret, bus_ret;
+	int ret;
 	u32 proc = id, scm_ret = 0;
 
-	bus_ret = scm_pas_enable_bw();
+	ret = scm_pas_enable_bw();
+	if (ret)
+		return ret;
+
 	ret = scm_call(SCM_SVC_PIL, PAS_AUTH_AND_RESET_CMD, &proc,
 			sizeof(proc), &scm_ret, sizeof(scm_ret));
 	if (ret)
 		scm_ret = ret;
-	if (!bus_ret)
-		scm_pas_disable_bw();
+
+	scm_pas_disable_bw();
 
 	return scm_ret;
 }
@@ -214,17 +251,25 @@ EXPORT_SYMBOL(pas_supported);
 
 static int __init scm_pas_init(void)
 {
-	if (cpu_is_msm8974()) {
+	int i, rate;
+	for (i = 0; i < NUM_CLKS; i++) {
+		scm_clocks[i] = clk_get_sys("scm", scm_clock_names[i]);
+		if (IS_ERR(scm_clocks[i]))
+			scm_clocks[i] = NULL;
+	}
+
+	/* Fail silently if this clock is not supported */
+	rate = clk_round_rate(scm_clocks[CORE_CLK_SRC], 1);
+	clk_set_rate(scm_clocks[CORE_CLK_SRC], rate);
+
+	if (cpu_is_msm8974() || cpu_is_msm8226() || cpu_is_msm8610()) {
 		scm_pas_bw_tbl[0].vectors[0].src = MSM_BUS_MASTER_CRYPTO_CORE0;
 		scm_pas_bw_tbl[1].vectors[0].src = MSM_BUS_MASTER_CRYPTO_CORE0;
 	} else {
-		scm_bus_clk = clk_get_sys("scm", "bus_clk");
-		if (!IS_ERR(scm_bus_clk)) {
-			clk_set_rate(scm_bus_clk, 64000000);
-		} else {
-			scm_bus_clk = NULL;
+		if (!IS_ERR(scm_clocks[BUS_CLK]))
+			clk_set_rate(scm_clocks[BUS_CLK], 64000000);
+		else
 			pr_warn("unable to get bus clock\n");
-		}
 	}
 
 	scm_perf_client = msm_bus_scale_register_client(&scm_pas_bus_pdata);

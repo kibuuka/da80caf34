@@ -176,9 +176,11 @@ static int mmc_clock_opt_set(void *data, u64 val)
 	if (val > host->f_max)
 		return -EINVAL;
 
+	mmc_rpm_hold(host, &host->class_dev);
 	mmc_claim_host(host);
 	mmc_set_clock(host, (unsigned int) val);
 	mmc_release_host(host);
+	mmc_rpm_release(host, &host->class_dev);
 
 	return 0;
 }
@@ -208,6 +210,7 @@ static int mmc_max_clock_set(void *data, u64 val)
 	if (!host || (val < host->f_min))
 		goto out;
 
+	mmc_rpm_hold(host, &host->class_dev);
 	mmc_claim_host(host);
 	if (host->bus_ops && host->bus_ops->change_bus_speed) {
 		old_freq = host->f_max;
@@ -219,6 +222,7 @@ static int mmc_max_clock_set(void *data, u64 val)
 			host->f_max = old_freq;
 	}
 	mmc_release_host(host);
+	mmc_rpm_release(host, &host->class_dev);
 out:
 	return err;
 }
@@ -286,6 +290,7 @@ static int mmc_dbg_card_status_get(void *data, u64 *val)
 	u32		status;
 	int		ret;
 
+	mmc_rpm_hold(card->host, &card->dev);
 	mmc_claim_host(card->host);
 
 	ret = mmc_send_status(data, &status);
@@ -293,6 +298,7 @@ static int mmc_dbg_card_status_get(void *data, u64 *val)
 		*val = status;
 
 	mmc_release_host(card->host);
+	mmc_rpm_release(card->host, &card->dev);
 
 	return ret;
 }
@@ -319,9 +325,11 @@ static int mmc_ext_csd_open(struct inode *inode, struct file *filp)
 		goto out_free;
 	}
 
+	mmc_rpm_hold(card->host, &card->dev);
 	mmc_claim_host(card->host);
 	err = mmc_send_ext_csd(card, ext_csd);
 	mmc_release_host(card->host);
+	mmc_rpm_release(card->host, &card->dev);
 	if (err)
 		goto out_free;
 
@@ -484,6 +492,20 @@ static ssize_t mmc_wr_pack_stats_read(struct file *filp, char __user *ubuf,
 			pack_stats->pack_stop_reason[LARGE_SEC_ALIGN]);
 		strlcat(ubuf, temp_buf, cnt);
 	}
+	if (pack_stats->pack_stop_reason[RANDOM]) {
+		snprintf(temp_buf, TEMP_BUF_SIZE,
+			 "%s: %d times: random request\n",
+			mmc_hostname(card->host),
+			pack_stats->pack_stop_reason[RANDOM]);
+		strlcat(ubuf, temp_buf, cnt);
+	}
+	if (pack_stats->pack_stop_reason[FUA]) {
+		snprintf(temp_buf, TEMP_BUF_SIZE,
+			 "%s: %d times: fua request\n",
+			mmc_hostname(card->host),
+			pack_stats->pack_stop_reason[FUA]);
+		strlcat(ubuf, temp_buf, cnt);
+	}
 
 	spin_unlock(&pack_stats->lock);
 
@@ -526,141 +548,6 @@ static const struct file_operations mmc_dbg_wr_pack_stats_fops = {
 	.open		= mmc_wr_pack_stats_open,
 	.read		= mmc_wr_pack_stats_read,
 	.write		= mmc_wr_pack_stats_write,
-};
-
-static int mmc_new_req_stats_open(struct inode *inode, struct file *filp)
-{
-	struct mmc_card *card = inode->i_private;
-
-	filp->private_data = card;
-	card->async_event_stats.print_in_read = 1;
-	return 0;
-}
-
-static ssize_t mmc_new_req_stats_read(struct file *filp, char __user *ubuf,
-				size_t cnt, loff_t *ppos)
-{
-	struct mmc_card *card = filp->private_data;
-	struct mmc_async_event_stats *s;
-	char *temp_buf;
-
-	if (!card)
-		return cnt;
-
-	s = &card->async_event_stats;
-
-	if (!card->async_event_stats.enabled) {
-		pr_info("%s: New Request statistics are disabled\n",
-			 mmc_hostname(card->host));
-		goto exit;
-	}
-
-	temp_buf = kmalloc(2 * TEMP_BUF_SIZE, GFP_KERNEL);
-	if (!temp_buf)
-		goto exit;
-
-	memset(ubuf, 0, cnt);
-	memset(temp_buf, 0, 2 * TEMP_BUF_SIZE);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: new notification & req statistics:\n",
-		mmc_hostname(card->host));
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: done_flag:%d\n", mmc_hostname(card->host), s->done_flag);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: cmd_retry:%d\n", mmc_hostname(card->host), s->cmd_retry);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: NULL fetched:%d\n", mmc_hostname(card->host),
-		 s->null_fetched);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: wake up new:%d\n",
-			mmc_hostname(card->host), s->wakeup_new);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: new_request_flag:%d\n", mmc_hostname(card->host),
-		 s->new_request_flag);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: no waiting:%d\n", mmc_hostname(card->host),
-		 s->q_no_waiting);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: no_mmc_request_action:%d\n", mmc_hostname(card->host),
-		 s->no_mmc_request_action);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: wakeup_mq_thread:%d\n", mmc_hostname(card->host),
-		 s->wakeup_mq_thread);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: fetch_due_to_new_req:%d\n", mmc_hostname(card->host),
-		 s->fetch_due_to_new_req);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: returned_new_req:%d\n", mmc_hostname(card->host),
-		 s->returned_new_req);
-	strlcat(ubuf, temp_buf, cnt);
-
-	snprintf(temp_buf, TEMP_BUF_SIZE,
-		 "%s: done_when_new_req_event_on:%d\n",
-		 mmc_hostname(card->host), s->done_when_new_req_event_on);
-	strlcat(ubuf, temp_buf, cnt);
-
-	kfree(temp_buf);
-
-	pr_info("%s", ubuf);
-
-exit:
-	if (card->async_event_stats.print_in_read == 1) {
-		card->async_event_stats.print_in_read = 0;
-		return strnlen(ubuf, cnt);
-	}
-
-	return 0;
-}
-
-static ssize_t mmc_new_req_stats_write(struct file *filp,
-				       const char __user *ubuf, size_t cnt,
-				       loff_t *ppos)
-{
-	struct mmc_card *card = filp->private_data;
-	int value;
-
-	if (!card)
-		return cnt;
-
-	sscanf(ubuf, "%d", &value);
-	if (value) {
-		mmc_blk_init_async_event_statistics(card);
-		pr_info("%s: %s: New request statistics are enabled",
-			mmc_hostname(card->host), __func__);
-	} else {
-		card->async_event_stats.enabled = false;
-		pr_info("%s: %s: New request statistics are disabled",
-			mmc_hostname(card->host), __func__);
-	}
-
-	return cnt;
-}
-
-static const struct file_operations mmc_dbg_new_req_stats_fops = {
-	.open		= mmc_new_req_stats_open,
-	.read		= mmc_new_req_stats_read,
-	.write		= mmc_new_req_stats_write,
 };
 
 static int mmc_bkops_stats_open(struct inode *inode, struct file *filp)
@@ -807,10 +694,6 @@ void mmc_add_card_debugfs(struct mmc_card *card)
 		if (!debugfs_create_file("wr_pack_stats", S_IRUSR, root, card,
 					 &mmc_dbg_wr_pack_stats_fops))
 			goto err;
-
-	if (!debugfs_create_file("new_req_stats", S_IRUSR, root, card,
-				&mmc_dbg_new_req_stats_fops))
-		goto err;
 
 	if (mmc_card_mmc(card) && (card->ext_csd.rev >= 5) &&
 	    card->ext_csd.bkops_en)
